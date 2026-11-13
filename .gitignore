@@ -1,0 +1,44 @@
+# 密钥与凭据 —— 绝不提交
+*.env
+.env
+**/secrets/
+.shangyi-secrets/
+
+# 系统附属文件（外接盘生成的 ._ 前缀文件）
+._*
+
+# 构建产物
+target/
+**/*.rs.bk
+
+# Python 侧车
+.venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# 依赖树（体积大、可重建）
+node_modules/
+**/node_modules/
+# pnpm store（可重建，26 MB；不是源码）
+.pnpm-store/
+
+# git 目录迁移备份（迁移验证完成后可手工删除）
+.git.mountbak/
+
+# 重构期本机构建目录（勿提交）
+.cargo-target/
+.dsh-home-probe/
+
+# 新 TS 重建仓库（独立 git，只暂存于此处）
+shangyi-ts/
+
+# 非公开内容（仅本地保留，不纳入公开仓库）
+research/
+projects/
+shangyi/ui/shangyi-icons/check-out/
+docs/商奕项目计划书.*
+docs/申报-项目概况.md
+.shangyi-loop/

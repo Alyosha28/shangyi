@@ -1,0 +1,24 @@
+# 商奕 L0 领域基座：GameSpec 数据结构与校验（设计文档 §5.2）
+# 依赖方向：本 crate 属平面 B 的 L0，不依赖平面 A（vendor harness），
+# 使领域模型可独立测试与演进。
+[package]
+name = "shangyi-gamespec"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+
+[dev-dependencies]
+# ⚠️ 仅为**测试构建**显式启用 `serde_json/arbitrary_precision`：
+# R1 前该 feature 由上游 vendor crate 带入全图，R1 摘除后正式依赖图里已不存在。
+# 本 crate 的序列化规则（禁用 internally-tagged / untagged 含数值枚举）需要一个
+# 会真的触发 `invalid type: map, expected f64` 的环境来保住回归覆盖，故在
+# test profile 显式启用它；release 数字语义不受影响。
+# 见 crate 文档的「序列化规则」章节。
+serde_json = { version = "1", features = ["arbitrary_precision"] }

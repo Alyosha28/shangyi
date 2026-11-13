@@ -1,0 +1,99 @@
+# 竞对情报剧本：回答「对手下一步可能做什么、我们怎么接」
+meta:
+  id: competitor_intel
+  name: 竞对情报
+  description: 参与者画像 + 类型推断；回答「对手下一步可能做什么、我们怎么接」
+  order: 20
+  version: 1
+
+applicable_when:
+  - 需要对 1–3 个已知竞对的行为倾向做结构化判断
+  - 有可采集的公开行为证据（价格、扩店、招聘、表态）
+  - 决策依赖「对手会怎么反应」这一前提
+fails_when:
+  - 竞对的行为证据不足（画像会退化为猜测——此时应如实标注未取得，而不是硬做）
+  - 决策不依赖对手反应（那是单边优化问题，不需要博弈模型）
+required_inputs:
+  - 竞对名单
+  - 近 12 个月的可观察行为事件
+  - 本企业的应对选项
+
+value_net:
+  priority: [substitutor, customer, external, supplier]
+  scan_depth:
+    substitutor: deep
+    customer: medium
+    supplier: shallow
+    complementor: skip
+    external: medium
+
+intake:
+  - id: q1
+    text: "你要判断的是哪几个对手？请按重要性排序。"
+    kind: text
+  - id: q2
+    text: "他们最近有什么让你在意的大动作？"
+    kind: text
+  - id: q3
+    text: "如果对手突然大幅让利，你的损失会有多大？"
+    kind: choice
+    options: ["致命", "很痛但可承受", "有影响但不关键", "几乎无影响"]
+  - id: q4
+    text: "你掌握哪些他们的公开数据？（财报/招聘/门店/平台价格等）"
+    kind: text
+  - id: q5
+    text: "你打算在未来多久内做决策？"
+    kind: text
+
+models:
+  - bayesian_type_inference
+  - signaling_game
+  - differentiated_bertrand
+
+selectors:
+  risk_dom: 0.10
+  stochastic: 0.15
+  behavioral: 0.30
+  focal_llm: 0.10
+  persona_sim: 0.35
+  learning: 0.0
+
+tool_allowlist:
+  - vn_map
+  - pars_check
+  - ask_user
+  - poi_survey
+  - web_search
+  - research_record
+  - business_cost
+  - web_fetch
+  - data_ingest
+  - participant_profile_update
+  - gamespec_build
+  - gamespec_validate
+  - solve_equilibria
+  - select_equilibria
+  - select_fuse
+  - swarm_run
+  - novel_move_filter
+  - consequence_predict
+  - monte_carlo
+  - sensitivity_scan
+  - discover_satisfice
+  - preference_inject
+  - report_render
+  # R23/R24 新增：模型提议回退（用户裁决）+ recommend 阶段的产物工具。
+  # **曾经漏加**：注册表与阶段白名单都加了，唯独剧本白名单没加——
+  # 而它是第二层过滤，于是这两类工具在真实运行中**永远调不动**。
+  - recommend_build
+  - request_rewind
+  - case_store_read
+  - case_store_write
+  - kb_retrieve
+  - checkpoint
+
+report_vars:
+  participant_profiles: "intel.profiles"
+  type_posterior: "intel.posterior_types"
+  evidence_quality: "intel.evidence_quality"
+  assumption_ledger: "checkpoint.items"

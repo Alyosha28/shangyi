@@ -1,0 +1,145 @@
+# 商奕依赖治理（设计文档 §4.5 许可白名单 + §4.4 禁用清单）
+#
+# # 为什么这个文件必须在**仓库根**
+#
+# `cargo deny` 从**当前工作目录**向上找 `deny.toml`。此前仓库根没有它，
+# 于是根目录下的 `cargo deny check licenses` 会打印
+# "unable to find a config path, falling back to default config"，
+# 然后按 cargo-deny 的**内置默认策略**判许可——那与 §4.5 的白名单**不是一回事**。
+# 实测：同一棵树在根目录裸跑判 FAILED（默认策略不容 `BSD-2-Clause`），
+# 用 `--config` 指向当时由上游基线镜像带入的同款策略则 `licenses ok`。同一个门禁
+# 两种结论，说明该门禁此前**依赖于人记得加 `--config`**——那不是一个门禁，是一个习惯。
+#
+# 本文件把 §4.5 的白名单钉在根上，使裸跑即为正确判定。
+#
+# 基线：R1（2026-11-10）之前抄自上游基线镜像的同款 Apache-2.0 策略，并按 §4.5
+# 增补 sidecar 与领域栈所需许可。该镜像已随 R1 整树移除，**本文件自此是本仓库
+# 唯一的许可策略来源**，不再有需要同步的上游。
+
+[graph]
+targets = [
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-unknown-linux-gnu" },
+]
+
+[output]
+feature-depth = 1
+
+# ── 许可白名单（§4.5）────────────────────────────────────────────────
+[licenses]
+# 未列入者**即失败**。新增依赖前先在此登记，并说明用途与许可依据。
+allow = [
+    # Apache-2.0：商奕自有 crate 与多数第三方依赖
+    "Apache-2.0",
+    # target-lexicon
+    "Apache-2.0 WITH LLVM-exception",
+    # 传递依赖（当前使用者：arrayref ← blake3）。R1 前的主要来源
+    # `Inflector ← schemafy ← starlark` 链已随基座整树移除。
+    "BSD-2-Clause",
+    # encoding_rs、seccompiler
+    "BSD-3-Clause",
+    # 传递依赖（boost 系）
+    "BSL-1.0",
+    # CC0-1.0：dunce、notify
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    # MPL-2.0 是**文件级** copyleft：允许使用，但**不得修改**该文件。
+    # 使用者：nucleo-matcher（见下方 exceptions 的显式登记）。
+    "MPL-2.0",
+    # OpenSSL：aws-lc-sys
+    "OpenSSL",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+# 置信度阈值：低于它（例如声明为含糊的 "non-standard"）即失败——
+# §4.4 里被否掉的 `amfiteatr` 正是栽在这条上。
+#
+# ⚠️ 它必须出现在 `[[licenses.exceptions]]` **之前**：TOML 里数组表的键
+# 会一直归属到下一个表头，反之会把本键解析进 exceptions 元素（实测报
+# "unexpected keys, expected: [allow]"）。
+confidence-threshold = 0.9
+
+# 显式登记：把"哪些 crate 用了 MPL"钉住，使"不得改动"这条义务可被审计。
+# 现状：R1 后 `nucleo-matcher` 已不在图中（原由基座带入），故 `cargo deny` 会报
+# `license-exception-not-encountered` 警告——这是**预期**的，不影响判定
+# （仍是 `licenses ok`）。保留登记，使该 crate 若回来时"不得改动"义务有依据。
+[[licenses.exceptions]]
+name = "nucleo-matcher"
+allow = ["MPL-2.0"]
+
+[licenses.private]
+# `ignore = false`：**私有不豁免**。商奕自有 crate 全部标了 `publish = false`，
+# 若这里 ignore 为 true，它们会**跳过许可检查**——自有 crate 的许可声明同样需要
+# 被门禁看见。故必须检查。
+ignore = false
+
+# ── 禁用清单（§4.4）──────────────────────────────────────────────────
+#
+# 只用 `deny` 拦 crate **名**能拦住的那些；许可层面的排除靠上面的白名单
+# （白名单是"默认拒绝"，比黑名单强）。此处列的是**即使许可合规也不得引入**的
+# 依赖，理由是成熟度或"同名陷阱"——这类风险白名单看不见。
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+deny = [
+    # ── 许可不合规（GPL/AGPL/EPL 系）──
+    # AGPL-3.0-only：闭源商业产品硬性否决；且它恰是支持枚举最想要的机械
+    # ⇒ 必须自研（D-A6，已由 shangyi-solver 落地）
+    { name = "lrslib-rs" },
+    { name = "lrslib-sys" },
+    # 传递 CoinOR CBC（EPL-2.0）：静态链接进闭源二进制是合规问题
+    { name = "coin_cbc" },
+    # GPL-2.0-or-later
+    { name = "pygambit" },
+
+    # ── 非 Rust 同名陷阱（§4.4）──
+    # `gambit`（crates.io）实为"A chess engine implemented in Rust"，与博弈论无关；
+    # `gambit-rs` 是某 Web 协议的异步客户端。两者都极易被误当作求解器引入。
+    { name = "gambit" },
+    { name = "gambit-rs" },
+
+    # ── 许可未明 / 未经验证（§4.4）──
+    # crates.io 的 license 字段字面为 "non-standard"
+    { name = "amfiteatr" },
+    { name = "amfiteatr_core" },
+    # 单次发布、下载量极低、README 缺失或自述"不能用于生产决策"
+    { name = "game-theory-core" },
+    { name = "game-theory-mcp" },
+    { name = "lau-game-theory-agents" },
+    { name = "extensive-form" },
+    { name = "neumann" },
+    # 约 3.5 年无版本、README 404、玩具级 ⇒ 仅可作参考代码
+    { name = "nash" },
+    # 2020 年后停止维护（仅成熟度原因，许可本身合规）
+    { name = "minilp" },
+]
+
+# `reqwest` 必须**只能**由 `http-client` 依赖（§6.1 的治理规则，
+# 见设计文档 §15 与 §6.2：新 wire 适配器不得绕开 http-client 直接引 reqwest）。
+# 用 `skip` 而非 `deny`：shangyi-llm 走 `ureq`（另一条被登记的路径）。
+# 现状（R1 后）：图中已无 `reqwest`（`grep -c '^name = "reqwest"' Cargo.lock` = 0）；
+# 本段保留，作为将来把 `reqwest` 重新登记回来时的治理依据。
+skip = [
+    # 上游自身携带的多版本并存（D-L2 记录的工具链现实，非商奕引入）
+    { name = "syn", version = "=1.0.109" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# R1 后 lock 中已无 git 源（`grep -c '^source = "git' Cargo.lock` = 0）。
+# 空列表 = 任何 git 源都被拒；将来若登记新源，在此逐条列 URL 前缀并写明理由。
+allow-git = []
+
+[advisories]
+ignore = []

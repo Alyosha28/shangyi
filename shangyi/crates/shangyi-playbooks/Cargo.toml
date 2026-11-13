@@ -1,0 +1,20 @@
+# 商奕 L0 数据与配置：剧本（playbook）加载与配置分层（设计文档 §13）。
+#
+# 关键设计：配置分层采用**整行替换**语义（同 id 的层条目完全替换该行，绝不深合并）。
+# 理由见 §2.4：深合并是"为什么这个超时还是 30？"的经典来源——某字段从低层存活
+# 因为上层只想改一个兄弟字段。整行替换使生效配置可检视、可 diff。
+#
+# 与上游 Codex 的差异（Harness §13.4.1）：商奕自有的剧本配置用整行替换；
+# 但 **Codex 基座**的 TOML 层栈是深合并（已实测证实），故基座侧另有例外清单。
+# 本 crate 只管商奕自有配置。
+[package]
+name = "shangyi-playbooks"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+thiserror = "2"

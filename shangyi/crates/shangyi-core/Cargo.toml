@@ -1,0 +1,38 @@
+# 商奕 L3 接线层：会话阶段机与内核集成（设计文档 §7.3）
+# 依赖方向：本 crate **只依赖商奕自有 crate**（`shangyi/*`）与通用第三方库。
+# ⚠️ 禁止引入任何外部 harness／基座依赖（历史基座 crate、其钉版、其 fork 源）。
+#    护栏：`tools/loop/check-no-harness.py`；进程内快速版见
+#    `src/lib.rs` 的 `no_external_harness_in_manifests` 测试。
+[package]
+name = "shangyi-core"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+# 依赖说明（本 crate 是 §6.3 平面 B 的 L3 接线层）：
+# 它把 L0–L2 各引擎串成可运行的咨询流程，故依赖面最宽。
+# **无循环依赖**：所有被依赖 crate 都不反过来依赖 shangyi-core。
+[dependencies]
+shangyi-gamespec = { path = "../shangyi-gamespec" }
+shangyi-playbooks = { path = "../shangyi-playbooks" }
+shangyi-tools = { path = "../shangyi-tools" }
+shangyi-solver = { path = "../shangyi-solver" }
+shangyi-selection = { path = "../shangyi-selection" }
+shangyi-consequence = { path = "../shangyi-consequence" }
+shangyi-discover = { path = "../shangyi-discover" }
+shangyi-intel = { path = "../shangyi-intel" }
+shangyi-report = { path = "../shangyi-report" }
+shangyi-kb = { path = "../shangyi-kb" }
+# persona 群仿真（`swarm_run` 工具）。swarm 侧只产出 `Move`（提议），
+# 评估回本 crate——故依赖方向是 core → swarm，反向依赖会成环。
+shangyi-swarm = { path = "../shangyi-swarm" }
+# LLM 接入层：循环靠它构造请求。泛型 `Transport` 使请求形状可在无网络下被断言
+shangyi-llm = { path = "../shangyi-llm" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_path_to_error = "0.1"
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"

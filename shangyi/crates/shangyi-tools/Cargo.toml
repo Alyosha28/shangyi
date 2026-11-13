@@ -1,0 +1,28 @@
+# 商奕 L3 接线层：领域工具集（设计文档 §4 与 Harness §9.3）。
+#
+# 本 crate 只定义**工具的规格与调度契约**，不实现具体工具的 I/O：
+# 使"工具白名单来自剧本"（§13.3）与"LLM 不算数"（数值必经引擎）在类型上可强制。
+#
+# 关键设计：工具分为三类，其**数值可信度不同**：
+#   - Engine：由确定性 Rust 代码算出（可进报告）
+#   - Sidecar：经进程隔离的 Python 侧车（绘图/embedding，不产生数字）
+#   - Proposal：LLM 提案（须经引擎评估才能进报告）
+# 报告生成器按此分类过滤——`Proposal` 类结果不得直接进报告（铁律 1）。
+[package]
+name = "shangyi-tools"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+shangyi-playbooks = { path = "../shangyi-playbooks" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+# 工具参数 schema（§7.2 工具表的落地）。放在**普通依赖**而非 dev：
+# `schema::tool_schema` 是生产路径（agent 循环构造请求时用它），
+# 只在测试里可用等于没用。
+serde_json = "1"
+
+[dev-dependencies]
+serde_json = "1"

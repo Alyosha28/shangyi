@@ -1,0 +1,8 @@
+# 商奕前端外壳的 bundle 补丁。
+# 1) 关掉官方品牌插件（它占着 sidebar.brand.mark / sidebar.brand.name 两个单槽）；
+# 2) 插入本插件自己的 Host 行（Host 半 apply() 为空，工作全在浏览器半）。
+- id: ui-brand-official
+  disabled: true
+- insert:
+    - id: shangyi-shell
+      name: 'dsh-plugin-shangyi-shell'

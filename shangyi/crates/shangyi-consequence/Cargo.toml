@@ -1,0 +1,20 @@
+# 商奕 L2 决策引擎：条件后果预测（whatif 管线，设计文档 §5.6.1）。
+#
+# 本 crate 的关键职责是**开放行动空间**：封闭策略空间的 BR 枚举对弱势方的
+# 矩阵外反击结构性失明（星宇股份事件 2026-08 的教训）。故「非常规反应生成 +
+# 三重过滤 + 注册回博弈」是**必要组成**而非可选增强。
+#
+# 依赖：L1 求解器与选择引擎、L0 GameSpec。不依赖 vendor harness。
+[package]
+name = "shangyi-consequence"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+shangyi-gamespec = { path = "../shangyi-gamespec" }
+shangyi-solver = { path = "../shangyi-solver" }
+shangyi-selection = { path = "../shangyi-selection" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"

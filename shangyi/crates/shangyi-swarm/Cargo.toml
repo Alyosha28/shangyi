@@ -1,0 +1,34 @@
+# 商奕 L2 决策引擎：参与者子智能体仿真（Agent Swarm，设计文档 §5.7）。
+#
+# 两项职责（§5.7）：
+#   ① 均衡选择引擎的**行为证据来源**（persona_sim 判据的架构化升级）
+#   ② 非常规（矩阵外）行动的**生成器**（与 §5.7.1 的开放行动空间配套）
+#
+# 铁律 1 的落点（§5.7 明确）：sub-agent 可以**提议**行动（含矩阵外），
+# 但**评估一律回主引擎**——novel move 注册入 GameSpec 后由解析求解与选择引擎重算后果。
+# Swarm 的输出是**行为证据与候选来源，不是结论本身**。本 crate 因此在类型上
+# 区分 Proposal（提议）与 Verdict（引擎判定）。
+#
+# 本 crate **不调用 LLM**：persona 的行动由外部（LLM 或规则）产生，经 trait 注入。
+[package]
+name = "shangyi-swarm"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+shangyi-gamespec = { path = "../shangyi-gamespec" }
+shangyi-solver = { path = "../shangyi-solver" }
+shangyi-consequence = { path = "../shangyi-consequence" }
+# LLM 接入层：唯一调用点在 `src/llm_actor.rs`（LlmPersonaActor）。
+# 它产出的是 Move（提议），仍须经 orchestrator::evaluate_candidates 才算数。
+# 注意 lib.rs 模块头仍写着「本 crate 不调用 LLM」——那是接线前的说法，
+# 差异已在该模块头里如实标注。
+shangyi-llm = { path = "../shangyi-llm" }
+serde = { version = "1", features = ["derive"] }
+# 从 dev-dependencies 移到 dependencies：llm_actor 的解析与工具 schema 用它
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]

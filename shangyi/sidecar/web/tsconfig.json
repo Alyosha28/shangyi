@@ -1,0 +1,35 @@
+{
+  "//": [
+    "前端类型检查配置——**只检查，不构建**。",
+    "",
+    "`noEmit` 是这里的关键：不产出任何文件，`js/**/*.js` 仍是浏览器与",
+    "`node --test` 直接执行的源文件。分发方式不变：",
+    "`python3 shangyi/sidecar/web_console.py` 一条命令即可运行，不需要 Node。",
+    "",
+    "`checkJs: false` + 各文件顶部的 `// @ts-check` = 逐文件自愿加入。",
+    "这样 `// @ts-check` 才是真在起作用，而不是全局打开后又用 allowJs 挡回去。",
+    "当前已加入 9 个文件；其余 8 个仍有 querySelector 收窄噪声，待收口后再加。",
+    "",
+    "不要在这里加 outDir / emit / declaration——那才是构建链，本项目刻意不引入。",
+    "依据：docs/商奕-前端类型化与构建可行性-v0.1.md"
+  ],
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true
+  },
+  "include": ["js/**/*.js"],
+  "//exclude": [
+    "`._*` 是 macOS AppleDouble 元数据伴随文件（.gitignore:8 已忽略），",
+    "但它们的后缀确实是 .js，会被 `js/**/*.js` 命中并让 tsc 当成源码解析。",
+    "本项目在挂载卷上工作，每次写文件都会再生成一批，故必须显式排除。"
+  ],
+  "exclude": ["js/**/._*", "node_modules"]
+}

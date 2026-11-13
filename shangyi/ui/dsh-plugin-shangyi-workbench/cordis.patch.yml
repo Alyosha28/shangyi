@@ -1,0 +1,5 @@
+# 商奕工作台的 bundle 补丁：只插入本插件一行。
+# 不在这里 disable 官方行（品牌位由 shell 插件负责，避免两份补丁互相打架）。
+- insert:
+    - id: shangyi-workbench
+      name: 'dsh-plugin-shangyi-workbench'

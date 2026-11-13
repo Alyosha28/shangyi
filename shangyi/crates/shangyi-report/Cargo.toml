@@ -1,0 +1,23 @@
+# 商奕 L1 领域基座：报告生成与 provenance 链（设计文档 §9 与 Harness §15.4）。
+#
+# 本 crate 的核心不是排版，而是**审计链**：v0.1 §1.5 铁律 1 要求
+# "报告中每个数字必须有代码/数据出处"。故每个数值出生即带 ProvenanceRecord，
+# 且渲染前强制检查"全部数字均可溯源"，缺源即拒绝出报告（工程不变量②）。
+#
+# 图形渲染（matplotlib 侧车）与 pandoc 在 crate 之外：本 crate 只产出
+# 图表**规格**与报告**结构**，使"数字由 Rust 算、渲染由侧车做"的分离可强制。
+[package]
+name = "shangyi-report"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+shangyi-gamespec = { path = "../shangyi-gamespec" }
+shangyi-selection = { path = "../shangyi-selection" }
+shangyi-consequence = { path = "../shangyi-consequence" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+blake3 = "1"

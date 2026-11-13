@@ -1,0 +1,7 @@
+# 验证实例的叠加层（不写进 profile 自己的 patch，随时可删）：
+# 关掉官方品牌位，插入商奕外壳。
+- id: ui-brand-official
+  disabled: true
+- insert:
+    - id: shangyi-shell
+      name: 'dsh-plugin-shangyi-shell'

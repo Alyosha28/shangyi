@@ -1,0 +1,24 @@
+# lenient 变体：把 mcp-shangyi 的 failOnStartupError 降回 false。
+#
+# 用途：**没有商奕二进制**的机器（例如只跑 `--dump-config` 的 CI、只做配置审阅的
+# 评审机）。这时服务端缺失不会让那一行报错退出，dsh 照常启动：
+#   - 3 个 MCP 资源工具仍在（list_mcp_resources / list_mcp_resource_templates /
+#     read_mcp_resource），但调用会报连接错误；
+#   - **零领域工具**（mcp__shangyi__* 一个都没有）；
+#   - **stderr 与 session log 都不会出现任何 MCP 报错**——这就是 P1-3 说的静默降级。
+# 所以：只适合"本来就不打算跑真实咨询"的场景。任何要出结论的部署都必须用严格默认
+# （dsh/profile/cordis.patch.yml 里 failOnStartupError: true），否则模型会对着
+# "领域工具不可用"如实回"未取得"，而部署方会误以为引擎没数据。
+#
+# 用法（安装脚本会把它复制到 $DSH_HOME/profiles/shangyi/lenient.patch.yml）：
+#   dsh --profile shangyi --patch "$DSH_HOME/profiles/shangyi/lenient.patch.yml" "..."
+#
+# patch 是整行替换 config，所以必须重述整份 mcp-shangyi config，只改最后一行。
+- id: mcp-shangyi
+  config:
+    serverName: shangyi
+    transport: stdio
+    command: !!js 'process.env.SHANGYI_BIN ?? "shangyi"'
+    args: ['mcp-serve']
+    toolCallTimeoutMs: 300000
+    failOnStartupError: false

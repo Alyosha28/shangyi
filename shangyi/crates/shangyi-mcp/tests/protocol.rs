@@ -1,0 +1,921 @@
+//! MCP 协议层与宿主的离线测试（**不 spawn 进程、不联网、不调模型**）。
+//!
+//! 端到端（spawn 真二进制）在 `shangyi-cli/tests/mcp_serve_e2e.rs`——
+//! `CARGO_BIN_EXE_<bin>` 只在定义该 bin 的 crate 的集成测试里注入，
+//! 而 `shangyi` 这个 bin 属于 `shangyi-cli`。
+//!
+//! 覆盖清单（与 task-4 的验收项逐条对应）：
+//! 1. 协议形状：initialize / tools/list / ping
+//! 2. 工具齐备：`tools/list` 数量 == `ToolRegistry::standard().len()`，且逐名对齐
+//! 3. schema 覆盖率：有/无 schema 各多少，无 schema 的**不伪造** properties
+//! 4. 真实工具调用：`solve_equilibria` 返回可解析的均衡 JSON
+//! 5. 阶段闸门：intake 阶段调 `solve_equilibria` 被拒
+//! 6. 未知工具 / 未知方法 / 非法 JSON
+//! 7. 通知不回复
+//! 8. 串行请求的顺序与 id 保持
+//! 9. Blocked（未取得）与 Failed（执行失败）可区分
+//! 10. checkpoint 在无 `--auto-approve-checkpoints` 时**不被**服务端确认
+
+use std::io::Cursor;
+use std::path::PathBuf;
+
+use serde_json::{Value, json};
+use shangyi_core::ConsultationMode;
+use shangyi_mcp::host::{HostConfig, SessionHost};
+use shangyi_mcp::protocol::PARSE_ERROR;
+use shangyi_mcp::server::{
+    PREFERRED_PROTOCOL_VERSION, SERVER_NAME, SUPPORTED_PROTOCOL_VERSIONS, Server,
+};
+use shangyi_mcp::tools::{CLIENT_SCHEMA_KEYWORDS, UNCONSTRAINED_NOTE, schema_coverage, wire_tools};
+use shangyi_tools::ToolRegistry;
+
+type TestServer = Server<Cursor<Vec<u8>>, Vec<u8>>;
+
+// ─────────────────────────── 夹具 ───────────────────────────
+
+/// 唯一临时目录（不引第三方 tempfile crate：本项目对依赖很节制）。
+fn temp_home(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("时钟")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "shangyi-mcp-{tag}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("建临时目录");
+    dir
+}
+
+fn new_server(tag: &str, auto_approve: bool) -> TestServer {
+    let host = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(temp_home(tag)),
+        auto_approve_checkpoints: auto_approve,
+        resume_case: None,
+    })
+    .expect("宿主应能打开（仓库内剧本必须存在）");
+    Server::new(Cursor::new(Vec::new()), Vec::new(), host)
+}
+
+fn request(srv: &mut TestServer, id: Value, method: &str, params: Value) -> Value {
+    let line = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string();
+    srv.handle_line(&line)
+        .unwrap_or_else(|| panic!("请求 `{method}` 必须有响应"))
+}
+
+fn notification(srv: &mut TestServer, method: &str) -> Option<Value> {
+    let line = json!({"jsonrpc":"2.0","method":method}).to_string();
+    srv.handle_line(&line)
+}
+
+/// 一次 `tools/call`，返回 MCP 的 result 对象（`{content, isError}`）。
+fn call(srv: &mut TestServer, id: Value, name: &str, args: Value) -> Value {
+    let response = request(srv, id, "tools/call", json!({"name": name, "arguments": args}));
+    assert!(
+        response.get("error").is_none(),
+        "工具级失败不应变成 RPC 错误：{response}"
+    );
+    response["result"].clone()
+}
+
+fn text_of(result: &Value) -> String {
+    let blocks = result["content"]
+        .as_array()
+        .unwrap_or_else(|| panic!("content 必须是数组：{result}"));
+    blocks
+        .iter()
+        .map(|b| b["text"].as_str().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// `content[0]`（工具本身的结论，不含会话状态块）。
+fn payload_of(result: &Value) -> String {
+    result["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("content[0] 必须是文本：{result}"))
+        .to_string()
+}
+
+fn is_error(result: &Value) -> bool {
+    result["isError"].as_bool().unwrap_or(false)
+}
+
+/// 合法的最小 GameSpec（与 `shangyi-core/tests/domain_exec.rs` 的夹具同形）。
+fn minimal_gamespec() -> Value {
+    json!({
+        "game_id": "mcp-probe",
+        "players": [
+            {"id": "us", "name": "我方", "vn_role": "focal", "relation_to_game": "player"},
+            {"id": "rival", "name": "对手", "vn_role": "substitutor", "relation_to_game": "player"}
+        ],
+        "strategies": {"us": ["维持", "降价"], "rival": ["维持", "降价"]},
+        "payoffs": {"form": "normal", "values": {"cells": {
+            "维持,维持": {"us": 3, "rival": 3},
+            "维持,降价": {"us": 0, "rival": 5},
+            "降价,维持": {"us": 5, "rival": 0},
+            "降价,降价": {"us": 1, "rival": 1}
+        }}},
+        "params": {
+            "margin": {"name": "margin", "value": 3,
+                       "source": {"kind": "user_confirmed", "checkpoint": "cp2"}}
+        }
+    })
+}
+
+// ─────────────────────────── 1. initialize ───────────────────────────
+
+#[test]
+fn initialize_echoes_supported_version_and_advertises_tools() {
+    let mut s = new_server("init", false);
+    let r = request(
+        &mut s,
+        json!(1),
+        "initialize",
+        json!({
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "test-client", "version": "0"}
+        }),
+    );
+    assert_eq!(r["jsonrpc"], json!("2.0"));
+    assert_eq!(r["id"], json!(1), "id 必须原样回显");
+    let result = &r["result"];
+    assert_eq!(
+        result["protocolVersion"],
+        json!("2025-11-25"),
+        "客户端给的版本在支持列表里时必须回显"
+    );
+    assert!(
+        result["capabilities"]["tools"].is_object(),
+        "必须声明 capabilities.tools：{result}"
+    );
+    assert_eq!(result["serverInfo"]["name"], json!(SERVER_NAME));
+    assert!(
+        !result["serverInfo"]["version"].as_str().unwrap_or("").is_empty(),
+        "serverInfo.version 不得为空"
+    );
+    assert!(
+        result["instructions"].as_str().unwrap_or("").contains("阶段"),
+        "instructions 必须说明阶段白名单"
+    );
+
+    // 协议版本协商的兜底：客户端版本不认识时，回我们声明的版本并写清。
+    let r2 = request(
+        &mut s,
+        json!(2),
+        "initialize",
+        json!({"protocolVersion": "1999-01-01", "capabilities": {}}),
+    );
+    assert_eq!(r2["result"]["protocolVersion"], json!(PREFERRED_PROTOCOL_VERSION));
+    assert!(
+        r2["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("1999-01-01"),
+        "未知版本必须在 instructions 里说清，而不是静默替换"
+    );
+    assert!(
+        SUPPORTED_PROTOCOL_VERSIONS.contains(&"2024-11-05"),
+        "必须保留最老的被广泛实现的版本"
+    );
+}
+
+// ─────────────────────────── 2. tools/list 齐备 ───────────────────────────
+
+#[test]
+fn tools_list_matches_the_registry_exactly() {
+    let mut s = new_server("list", false);
+    let r = request(&mut s, json!(1), "tools/list", json!({}));
+    let tools = r["result"]["tools"].as_array().expect("tools 数组");
+    let registry = ToolRegistry::standard();
+
+    // 数目：从源码数一遍（ToolRegistry::standard() 里的 spec 元组）。
+    //
+    // ⚠️ 任务描述写的是「41 条 spec」，而**实测源码是 38**：
+    // `shangyi-tools/src/lib.rs` 的 `let specs: Vec<...> = vec![...]` 段落里有 38 个
+    // 元组，`shangyi-tools/tests/registry.rs::standard_registry_has_all_documented_tools`
+    // 的 expected 列表也是 38 项。故这里的判据是"与注册表一致"，不是照抄 41。
+    assert_eq!(registry.len(), 38, "注册表工具数变了：请同步本断言与文档");
+    assert_eq!(
+        tools.len(),
+        registry.len(),
+        "tools/list 数量必须等于注册表（实得 {} vs {}）",
+        tools.len(),
+        registry.len()
+    );
+
+    // 名字逐一对齐（顺序：注册表是 BTreeMap，天然字典序）
+    let listed: Vec<String> = tools
+        .iter()
+        .map(|t| t["name"].as_str().expect("name").to_string())
+        .collect();
+    let expected: Vec<String> = registry.names().into_iter().map(str::to_string).collect();
+    assert_eq!(listed, expected, "工具名集合/顺序必须与注册表一致");
+
+    // 每个工具都必须是 MCP 的合法 Tool 对象
+    for t in tools {
+        let name = t["name"].as_str().unwrap();
+        assert!(!t["description"].as_str().unwrap_or("").is_empty(), "`{name}` 描述为空");
+        assert!(
+            t["inputSchema"].is_object(),
+            "`{name}` 的 inputSchema 必须是对象"
+        );
+    }
+
+    // 阶段白名单的可见性：注册表里声明的阶段必须真的在 spec 里（抽查一条承重的）
+    let solve = registry.get("solve_equilibria").expect("solve_equilibria 必须注册");
+    assert!(solve.allows_phase("solve"));
+    assert!(!solve.allows_phase("intake"), "求解不得在 intake 放行");
+}
+
+// ─────────────────────────── 3. schema 覆盖率（不伪造）───────────────────────────
+
+/// 收集一个 schema 里出现在**关键字位置**的键（`properties` 里的是字段名，不算）。
+fn keyword_keys(node: &Value, out: &mut Vec<String>) {
+    let Some(obj) = node.as_object() else { return };
+    for (key, value) in obj {
+        match key.as_str() {
+            "properties" => {
+                if let Some(props) = value.as_object() {
+                    for (_, sub) in props {
+                        keyword_keys(sub, out);
+                    }
+                }
+            }
+            "items" | "additionalProperties" => keyword_keys(value, out),
+            "oneOf" => {
+                if let Some(arr) = value.as_array() {
+                    for sub in arr {
+                        keyword_keys(sub, out);
+                    }
+                }
+            }
+            other => out.push(other.to_string()),
+        }
+    }
+}
+
+#[test]
+fn schema_coverage_is_reported_and_never_fabricated() {
+    let registry = ToolRegistry::standard();
+    let coverage = schema_coverage(&registry);
+
+    // 两份清单必须恰好覆盖全部工具，且不重叠
+    assert_eq!(
+        coverage.with_schema.len() + coverage.without_schema.len(),
+        registry.len(),
+        "schema 覆盖率统计漏了工具"
+    );
+    for name in &coverage.with_schema {
+        assert!(!coverage.without_schema.contains(name));
+    }
+    // 实测：35 有（含被客户端子集降级的）、3 无
+    assert_eq!(coverage.with_schema.len(), 35, "有显式 schema 的工具数变了");
+    assert_eq!(coverage.without_schema.len(), 3, "无 schema 的工具数变了");
+    assert_eq!(
+        coverage.without_schema,
+        vec![
+            "preference_inject".to_string(),
+            "sandbox_exec".to_string(),
+            "swarm_run".to_string()
+        ],
+        "无 schema 的工具清单变了：必须与 schema.rs 的 match 分支持平"
+    );
+
+    // 无 schema 的工具：**不得伪造** properties，且描述里如实标注
+    for tool in wire_tools(&registry) {
+        if tool.has_explicit_schema {
+            continue;
+        }
+        assert_eq!(
+            tool.input_schema,
+            json!({"type": "object"}),
+            "`{}` 没有 schema，只能退回自由对象（不许伪造 properties）",
+            tool.name
+        );
+        assert!(
+            tool.description.contains(UNCONSTRAINED_NOTE),
+            "`{}` 的描述必须如实标注「参数结构未逐一约束」",
+            tool.name
+        );
+    }
+
+    // 有 schema 的工具：线上 schema 里不得残留客户端子集外的关键字
+    // （残留会让 dsh 把整条 schema 的类型渲染降级成 unknown）
+    for tool in wire_tools(&registry) {
+        if !tool.has_explicit_schema {
+            continue;
+        }
+        let mut keys = Vec::new();
+        keyword_keys(&tool.input_schema, &mut keys);
+        let unsupported: Vec<&String> = keys
+            .iter()
+            .filter(|k| !CLIENT_SCHEMA_KEYWORDS.contains(&k.as_str()))
+            .collect();
+        assert!(
+            unsupported.is_empty(),
+            "`{}` 的线上 schema 仍有关键字 {:?}（应被降级并留痕）",
+            tool.name,
+            unsupported
+        );
+        // 降级必须留痕：description 里点名省略了什么
+        if !tool.downgraded.is_empty() {
+            for kw in &tool.downgraded {
+                assert!(
+                    tool.description.contains(kw.as_str()),
+                    "`{}` 省略了关键字却没在 description 里说明",
+                    tool.name
+                );
+            }
+        }
+    }
+    // 至少有一个工具真的被降级过——否则这条适配代码是死的（会让断言空转）
+    assert!(
+        !coverage.downgraded.is_empty(),
+        "预期有工具使用了客户端子集外的关键字（如 minimum），这个断言空了说明上游 schema 变了"
+    );
+}
+
+// ─────────────────────────── 4. 真实工具调用 ───────────────────────────
+
+#[test]
+fn solve_equilibria_real_call_returns_parseable_json() {
+    // 打开自动结算：完整咨询路径要过 cp1/cp2 两道确认闸门，而 MCP 目前没有
+    // 把用户答复回传的通道（见报告缺口清单）。这里走的是与
+    // `SHANGYI_ASSUME_YES=1` 完全相同的自动结算路径（日志记 actor=auto）。
+    let mut s = new_server("solve", true);
+    assert_eq!(s.host().phase().as_str(), "intake");
+
+    // intake：先选范围（与 `shangyi new` 一致，intake 不许默认进完整咨询）
+    let r = call(
+        &mut s,
+        json!(1),
+        "select_task_scope",
+        json!({"scope": "consultation", "reason": "用户要完整评估这次调价的应对"}),
+    );
+    assert!(!is_error(&r), "选范围应成功：{}", text_of(&r));
+    let scope: Value = serde_json::from_str(&payload_of(&r)).expect("选范围结果应是 JSON");
+    assert_eq!(scope["scope"], json!("consultation"));
+    assert_eq!(s.host().phase().as_str(), "intake", "控制类工具不推进阶段");
+
+    // vn_map 是 intake 的域工具：成功后闸门放行 intake → intel
+    let r = call(&mut s, json!(2), "vn_map", json!({}));
+    assert!(!is_error(&r), "vn_map 应成功：{}", text_of(&r));
+    serde_json::from_str::<Value>(&payload_of(&r)).expect("vn_map 输出应是 JSON");
+    assert_eq!(s.host().phase().as_str(), "intel", "intake 闸门通过后应进入 intel");
+
+    // intel 需要参与者画像 + cp1；先交产物，再确认
+    let r = call(
+        &mut s,
+        json!(3),
+        "participant_profile_update",
+        json!({
+            "participant_id": "rival",
+            "value_net_role": "substitutor",
+            "relation_to_game": "player",
+            "common": {"interests": ["保住份额"], "resources": ["本地渠道"]}
+        }),
+    );
+    assert!(!is_error(&r), "画像应成功：{}", text_of(&r));
+    assert_eq!(s.host().phase().as_str(), "intel", "cp1 未结算时不得推进");
+    assert!(
+        text_of(&r).contains("cp1"),
+        "闸门拒绝的理由必须带进工具结果（让模型知道缺什么）：{}",
+        text_of(&r)
+    );
+
+    // cp1（事实确认）：自动结算 → 推进到 model_build
+    let r = call(
+        &mut s,
+        json!(4),
+        "checkpoint",
+        json!({"items": [{"id": "i1", "content": "直接竞对只有一家（rival）"}]}),
+    );
+    assert!(!is_error(&r), "checkpoint 应成功：{}", text_of(&r));
+    let cp: Value = serde_json::from_str(&payload_of(&r)).expect("checkpoint 输出应是 JSON");
+    assert_eq!(cp["needs_user_input"], json!(false), "自动结算时应为 false");
+    assert_eq!(cp["approved_by"], json!("auto"));
+    assert_eq!(
+        s.host().phase().as_str(),
+        "model_build",
+        "cp1 结算后应推进到 model_build"
+    );
+
+    // model_build：交 GameSpec，再走 cp2（硬假设确认，每项必须带来源）
+    let r = call(&mut s, json!(5), "gamespec_build", minimal_gamespec());
+    assert!(!is_error(&r), "建模应成功：{}", text_of(&r));
+    let r = call(
+        &mut s,
+        json!(6),
+        "checkpoint",
+        json!({"items": [{"id": "p1", "content": "margin = 3", "source": "用户口述毛利率区间", "proposed_value": "3"}]}),
+    );
+    assert!(!is_error(&r), "cp2 应成功：{}", text_of(&r));
+    assert_eq!(s.host().phase().as_str(), "solve", "cp2 结算后应推进到 solve");
+
+    // ── 真正要验的：solve_equilibria 在 solve 阶段返回可解析的均衡 JSON ──
+    let r = call(&mut s, json!(7), "solve_equilibria", json!({}));
+    assert!(!is_error(&r), "求解应成功：{}", text_of(&r));
+    let solved: Value =
+        serde_json::from_str(&payload_of(&r)).expect("求解结果必须是可解析 JSON（不是散文）");
+    let equilibria = solved["equilibria"]
+        .as_array()
+        .or_else(|| solved["cells"].as_array())
+        .unwrap_or_else(|| panic!("解集 JSON 里应有 equilibria：{solved}"));
+    assert!(!equilibria.is_empty(), "囚徒困境式夹具至少有混合/纯策略均衡");
+}
+
+// ─────────────────────────── 5. 阶段闸门 ───────────────────────────
+
+#[test]
+fn phase_gate_rejects_solve_at_intake() {
+    let mut s = new_server("gate", false);
+
+    // 第一道闸：范围未选 ⇒ 拒绝并指向 select_task_scope（与 AgentLoop 同序）
+    let r = call(&mut s, json!(1), "solve_equilibria", json!({}));
+    assert!(is_error(&r), "未选范围时调 solver 必须失败：{}", text_of(&r));
+    assert!(
+        text_of(&r).contains("select_task_scope"),
+        "范围闸门的拒绝必须指出下一步：{}",
+        text_of(&r)
+    );
+
+    // 第二道闸：选了范围（完整咨询）之后，intake 阶段仍不能调 solve 工具
+    let scoped = call(
+        &mut s,
+        json!(2),
+        "select_task_scope",
+        json!({"scope": "consultation", "reason": "完整咨询"}),
+    );
+    assert!(!is_error(&scoped), "{}", text_of(&scoped));
+    assert_eq!(s.host().phase().as_str(), "intake", "控制类工具不推进阶段");
+
+    let r = call(&mut s, json!(3), "solve_equilibria", json!({}));
+    assert!(is_error(&r), "intake 阶段调 solver 必须是失败：{}", text_of(&r));
+    let msg = text_of(&r);
+    assert!(
+        msg.contains("不允许在阶段") && msg.contains("solve"),
+        "阶段闸门的拒绝必须带工具阶段白名单（`check_call` 的原文）：{msg}"
+    );
+    assert_eq!(s.host().phase().as_str(), "intake", "被拒的调用不得推动阶段");
+}
+
+#[test]
+fn task_scope_gate_points_at_select_task_scope() {
+    let mut s = new_server("scope", false);
+    // 未选范围时，除 select_task_scope / ask_user 外的工具都该被拒
+    let r = call(&mut s, json!(1), "vn_map", json!({}));
+    assert!(is_error(&r), "未选范围时 vn_map 应被拒：{}", text_of(&r));
+    assert!(
+        text_of(&r).contains("select_task_scope"),
+        "拒绝信息必须指出下一步动作：{}",
+        text_of(&r)
+    );
+}
+
+// ─────────────────────────── 6. 未知工具 / 未知方法 / 非法 JSON ───────────────────────────
+
+#[test]
+fn unknown_tool_is_a_tool_level_error_not_an_rpc_error() {
+    let mut s = new_server("unknown-tool", false);
+    let response = request(
+        &mut s,
+        json!(9),
+        "tools/call",
+        json!({"name": "no_such_tool", "arguments": {}}),
+    );
+    assert!(response.get("error").is_none(), "未知工具是工具级失败，不是 RPC 错误");
+    let result = &response["result"];
+    assert!(is_error(result));
+    assert!(
+        text_of(result).contains("no_such_tool") || text_of(result).contains("未注册"),
+        "错误里必须报出名字：{}",
+        text_of(result)
+    );
+}
+
+#[test]
+fn unknown_method_and_malformed_messages_use_rpc_errors() {
+    let mut s = new_server("rpc-errors", false);
+
+    // 未知方法 → -32601
+    let r = request(&mut s, json!(1), "tools/teleport", json!({}));
+    assert_eq!(r["error"]["code"], json!(-32601));
+
+    // 非法 JSON → -32700 且 id 为 null
+    let bad = s.handle_line("{not json").expect("解析错误也要回一条");
+    assert_eq!(bad["error"]["code"], json!(PARSE_ERROR));
+    assert_eq!(bad["id"], Value::Null);
+
+    // 合法 JSON 但不是对象 → -32600
+    let not_object = s.handle_line("[1,2,3]").expect("非法请求也要回一条");
+    assert_eq!(not_object["error"]["code"], json!(-32600));
+
+    // 缺 jsonrpc 版本 → -32600
+    let no_version = s.handle_line(r#"{"id":5,"method":"ping"}"#).expect("回一条");
+    assert_eq!(no_version["error"]["code"], json!(-32600));
+
+    // tools/call 参数不成话 → -32602（**协议级**，不是工具级）
+    let no_name = request(&mut s, json!(2), "tools/call", json!({"arguments": {}}));
+    assert_eq!(no_name["error"]["code"], json!(-32602));
+    let bad_args = request(
+        &mut s,
+        json!(3),
+        "tools/call",
+        json!({"name": "vn_map", "arguments": "不是对象"}),
+    );
+    assert_eq!(bad_args["error"]["code"], json!(-32602));
+}
+
+// ─────────────────────────── 7. 通知不回复 ───────────────────────────
+
+#[test]
+fn notifications_are_never_answered() {
+    let mut s = new_server("notify", false);
+    assert!(
+        notification(&mut s, "notifications/initialized").is_none(),
+        "initialized 通知绝不能有响应（规范要求）"
+    );
+    assert!(
+        notification(&mut s, "notifications/something_else").is_none(),
+        "不认识的通知也不得回复"
+    );
+    // 之后仍能正常应答（证明没有把后续输出吞掉）
+    let r = request(&mut s, json!(1), "ping", json!({}));
+    assert_eq!(r["result"], json!({}));
+    assert_eq!(s.stats().notifications, 2);
+}
+
+// ─────────────────────────── 8. 串行请求的顺序与 id ───────────────────────────
+
+#[test]
+fn serial_requests_keep_order_and_ids() {
+    let mut s = new_server("serial", false);
+    let ids = [json!("a"), json!(2), json!(3.5)];
+    let mut seen = Vec::new();
+    for (i, id) in ids.iter().enumerate() {
+        let method = if i == 0 { "ping" } else if i == 1 { "tools/list" } else { "initialize" };
+        let params = if method == "initialize" {
+            json!({"protocolVersion": "2025-06-18"})
+        } else {
+            json!({})
+        };
+        let r = request(&mut s, id.clone(), method, params);
+        seen.push(r["id"].clone());
+    }
+    assert_eq!(seen, ids, "响应顺序与 id 类型必须与请求一一对应（数字仍是数字）");
+}
+
+// ─────────────────────────── 9. Blocked vs Failed ───────────────────────────
+
+#[test]
+fn blocked_is_not_an_error_but_failed_is() {
+    let mut s = new_server("blocked", true);
+    // 先选范围 + 推进到 intel（web_search 在 intake 也允许，但 intel 更贴近真实用法）
+    call(
+        &mut s,
+        json!(1),
+        "select_task_scope",
+        json!({"scope": "consultation", "reason": "完整咨询"}),
+    );
+    call(&mut s, json!(2), "vn_map", json!({}));
+
+    // 检索后端未接线 ⇒ Blocked（"未取得"），不是 isError
+    let blocked = call(&mut s, json!(3), "web_search", json!({"query": "竞争对手调价"}));
+    assert!(
+        !is_error(&blocked),
+        "未取得（Blocked）不得报成 isError——那会让模型以为是自己调错了：{}",
+        text_of(&blocked)
+    );
+    let payload: Value = serde_json::from_str(&payload_of(&blocked)).expect("Blocked 应是结构化 JSON");
+    assert_eq!(payload["blocked"], json!(true));
+    assert_eq!(payload["tool"], json!("web_search"));
+    assert!(payload["reason"].as_str().unwrap_or("").contains("后端"));
+
+    // 参数错 ⇒ Failed（可纠正的执行失败），必须是 isError
+    let failed = call(
+        &mut s,
+        json!(4),
+        "participant_profile_update",
+        json!({"participant_id": "rival"}),
+    );
+    assert!(is_error(&failed), "执行失败必须是 isError：{}", text_of(&failed));
+    assert!(
+        text_of(&failed).contains("调用失败"),
+        "失败措辞要区分于未取得：{}",
+        text_of(&failed)
+    );
+}
+
+// ─────────────────────────── 10. checkpoint 不被服务端确认 ───────────────────────────
+
+#[test]
+fn checkpoint_without_auto_approve_waits_for_the_user() {
+    let mut s = new_server("checkpoint", false);
+    call(
+        &mut s,
+        json!(1),
+        "select_task_scope",
+        json!({"scope": "consultation", "reason": "完整咨询"}),
+    );
+    call(&mut s, json!(2), "vn_map", json!({}));
+    call(
+        &mut s,
+        json!(3),
+        "participant_profile_update",
+        json!({"participant_id": "rival", "value_net_role": "substitutor", "relation_to_game": "player"}),
+    );
+    let r = call(
+        &mut s,
+        json!(4),
+        "checkpoint",
+        json!({"items": [{"id": "i1", "content": "直接竞对只有一家"}]}),
+    );
+    assert!(!is_error(&r), "挂起不是失败：{}", text_of(&r));
+    let payload: Value = serde_json::from_str(&payload_of(&r)).expect("应为结构化 JSON");
+    assert_eq!(payload["needs_user_input"], json!(true));
+    assert_eq!(payload["checkpoint"], json!("cp1"));
+    assert_eq!(
+        payload["items"].as_array().unwrap().len(),
+        1,
+        "提问件必须原样转达（用户要看得到要确认什么）"
+    );
+    assert_eq!(
+        s.host().phase().as_str(),
+        "intel",
+        "没有用户答复时，阶段必须停在原处（闸门仍然拦着）"
+    );
+
+    // 再问一次同一 checkpoint：内容未变 ⇒ 幂等，不得报"已结算"
+    let again = call(
+        &mut s,
+        json!(5),
+        "checkpoint",
+        json!({"items": [{"id": "i1", "content": "直接竞对只有一家"}]}),
+    );
+    assert!(!is_error(&again), "重复提问同一内容不得失败：{}", text_of(&again));
+}
+
+// ─────────────────────────── 11. 留档目录不可写时优雅降级 ───────────────────────────
+
+/// `--home` 指向一个**普通文件**（而不是目录）⇒ 留档必然失败。
+///
+/// 断言：服务端仍然能起、协议仍然正确、并且**如实**报告"未落盘"
+/// （而不是静默当成记录了）。dsh profile 里 `args` 只有 `["mcp-serve"]`，
+/// 即默认走 `$HOME/.shangyi`——那个目录在某些环境里不可写，这条路径必须活着。
+#[test]
+fn unwritable_archive_dir_degrades_gracefully() {
+    let blocker = std::env::temp_dir().join(format!(
+        "shangyi-mcp-blocked-file-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("时钟")
+            .as_nanos()
+    ));
+    std::fs::write(&blocker, b"not a directory").expect("写文件");
+
+    let host = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        // home 是个文件 ⇒ $home/cases/<date>/<case> 建不出来
+        home: Some(blocker.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: None,
+    })
+    .expect("留档失败不得阻止会话启动");
+    assert!(
+        !host.archiving(),
+        "写不进去时必须如实报「未落盘」，不能假装记录了"
+    );
+    let mut srv = Server::new(Cursor::new(Vec::new()), Vec::new(), host);
+    let r = request(&mut srv, json!(1), "ping", json!({}));
+    assert_eq!(r["result"], json!({}), "协议面不得受影响");
+    let _ = std::fs::remove_file(blocker);
+}
+
+// ─────────────────────────── 12. 惰性建案、MCP Resources、双通道关口与恢复 ───────────────────────────
+
+#[test]
+fn lazy_caselog_does_not_create_case_dir_until_first_tool_call() {
+    let home = temp_home("lazy-log");
+    let host = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: None,
+    })
+    .expect("open");
+    assert!(host.archiving(), "可写目录应报 archiving=true");
+    let case_dir = host.case_dir().expect("case_dir").to_path_buf();
+    let mut srv = Server::new(Cursor::new(Vec::new()), Vec::new(), host);
+
+    let init = request(
+        &mut srv,
+        json!(1),
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": {}}),
+    );
+    assert!(init["result"]["capabilities"]["resources"].is_object());
+    let _ = request(&mut srv, json!(2), "tools/list", json!({}));
+    let res_list = request(&mut srv, json!(3), "resources/list", json!({}));
+    let resources = res_list["result"]["resources"].as_array().expect("resources");
+    assert!(resources.len() >= 40, "应列出 ≥40 项资源：{}", resources.len());
+
+    // 仅握手/列工具/列资源（探测进程模式）不得落盘空案例目录
+    assert!(
+        !case_dir.exists(),
+        "首次 tools/call 前不得创建空案例目录：{}",
+        case_dir.display()
+    );
+
+    // 首次真实调用工具后，立即创建 header.json 与 case.jsonl
+    let scoped = call(
+        &mut srv,
+        json!(4),
+        "select_task_scope",
+        json!({"scope": "consultation", "mode": "whatif", "playbook": "market_entry", "action": "先开单店试水", "reason": "动态选型测试"}),
+    );
+    assert!(!is_error(&scoped), "动态选型应成功：{}", text_of(&scoped));
+    assert_eq!(srv.host().mode(), ConsultationMode::Whatif);
+    assert_eq!(srv.host().playbook().meta.id, "market_entry");
+    assert_eq!(srv.host().action(), Some("先开单店试水"));
+    assert!(case_dir.join("header.json").is_file(), "首次调用后应写入 header.json");
+    assert!(case_dir.join("case.jsonl").is_file(), "首次调用后应写入 case.jsonl");
+}
+
+#[test]
+fn resources_protocol_handles_list_templates_read_and_security_errors() {
+    let mut s = new_server("resources-rpc", false);
+    let templates = request(&mut s, json!(1), "resources/templates/list", json!({}));
+    assert_eq!(
+        templates["result"]["resourceTemplates"].as_array().unwrap().len(),
+        2
+    );
+
+    let kb = request(
+        &mut s,
+        json!(2),
+        "resources/read",
+        json!({"uri": "shangyi://kb/adverse-selection"}),
+    );
+    assert!(
+        kb["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Akerlof")
+    );
+
+    let traversal = request(
+        &mut s,
+        json!(3),
+        "resources/read",
+        json!({"uri": "shangyi://kb/../secrets"}),
+    );
+    assert_eq!(traversal["error"]["code"], json!(-32602));
+
+    let missing = request(
+        &mut s,
+        json!(4),
+        "resources/read",
+        json!({"uri": "shangyi://kb/nonexistent-slug"}),
+    );
+    assert_eq!(missing["error"]["code"], json!(-32002));
+}
+
+#[test]
+fn conversational_checkpoint_rejects_forgery_and_settles_with_verified_post_checkpoint_quote() {
+    let home = temp_home("conv-cp");
+    let runtime_dir = home.join("runtime");
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+    let ledger = runtime_dir.join("trusted_user_inputs.jsonl");
+
+    // 关口打开前的首轮用户消息（可用于 constraint_register，但绝不可用于伪造后续关口确认）
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        &ledger,
+        format!(
+            "{{\"text\":\"月租金上限25000元，对手只有一家瑞幸\",\"user_actor\":\"user\",\"unix_secs\":{now_secs},\"at\":\"2026-11-12T10:00:00Z\"}}\n"
+        ),
+    )
+    .expect("write initial ledger");
+
+    let host = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: None,
+    })
+    .expect("open");
+    let mut s = Server::new(Cursor::new(Vec::new()), Vec::new(), host);
+
+    call(
+        &mut s,
+        json!(1),
+        "select_task_scope",
+        json!({"scope": "consultation", "reason": "测试双通道确认"}),
+    );
+    // 验证首轮真实用户原文可用于登记硬约束
+    let cr = call(
+        &mut s,
+        json!(2),
+        "constraint_register",
+        json!({
+            "quote": "月租金上限25000元"
+        }),
+    );
+    assert!(!is_error(&cr), "真实用户原文登记约束应成功：{}", text_of(&cr));
+
+    call(&mut s, json!(3), "vn_map", json!({}));
+    assert_eq!(s.host().phase().as_str(), "intel");
+    let pp = call(
+        &mut s,
+        json!(4),
+        "participant_profile_update",
+        json!({
+            "participant_id": "rival",
+            "value_net_role": "substitutor",
+            "relation_to_game": "player",
+            "common": {"interests": ["保住份额"], "resources": ["本地渠道"]}
+        }),
+    );
+    assert!(!is_error(&pp), "画像更新应成功：{}", text_of(&pp));
+    let opened = call(
+        &mut s,
+        json!(5),
+        "checkpoint",
+        json!({"items": [{"id": "i1", "content": "直接竞对只有一家瑞幸"}]}),
+    );
+    assert!(!is_error(&opened));
+    assert_eq!(s.host().phase().as_str(), "intel");
+
+    // 企图 1：模型不经用户回复直接伪造确认 ⇒ 必须被铁律 2 拒绝
+    let forged = call(
+        &mut s,
+        json!(6),
+        "checkpoint",
+        json!({"decision": "approve", "user_quote": "确认无误"}),
+    );
+    assert!(is_error(&forged), "无真实用户回复时自批必须被拒绝");
+    assert_eq!(s.host().phase().as_str(), "intel");
+
+    // 企图 2：模型拿关口打开**之前**的旧消息充当确认凭据 ⇒ 同样必须被拒绝
+    let replayed = call(
+        &mut s,
+        json!(7),
+        "checkpoint",
+        json!({"decision": "approve", "user_quote": "月租金上限25000元"}),
+    );
+    assert!(is_error(&replayed), "重放关口前旧消息必须被拒绝");
+    assert_eq!(s.host().phase().as_str(), "intel");
+
+    // 真实用户在关口打开后回复确认（写入可信账本）
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    use std::io::Write;
+    writeln!(
+        f,
+        "{{\"text\":\"核对无误，同意竞对画像，继续建模\",\"user_actor\":\"user\",\"at\":\"2026-11-12T10:01:00Z\"}}"
+    )
+    .unwrap();
+    drop(f);
+
+    let approved = call(
+        &mut s,
+        json!(8),
+        "checkpoint",
+        json!({"decision": "approve", "user_quote": "同意竞对画像"}),
+    );
+    assert!(
+        !is_error(&approved),
+        "真实关口后用户消息应成功结算：{}",
+        text_of(&approved)
+    );
+    assert_eq!(
+        s.host().phase().as_str(),
+        "model_build",
+        "结算 cp1 后应自动推进到 model_build"
+    );
+
+    // 再测试 --resume 跨进程恢复（阶段与产物完整保留）
+    let case_id = s.host().case_id().to_string();
+    drop(s);
+
+    let resumed_host = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home),
+        auto_approve_checkpoints: false,
+        resume_case: Some(case_id.clone()),
+    })
+    .expect("resume open");
+    assert_eq!(resumed_host.case_id(), case_id);
+    assert_eq!(resumed_host.phase().as_str(), "model_build");
+}

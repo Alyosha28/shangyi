@@ -1,0 +1,37 @@
+# 商奕 L1 领域基座：情报层与参与者画像（设计文档 §6）。
+#
+# 两位一体：① 公开数据源清单与合规红线；② 参与者画像 Schema（价值网全角色）。
+#
+# 合规红线（§6.1）是**类型级**的：数据源类别区分"公开商业信息"与"个人信息"，
+# 后者在类型上不可构造 —— 使"不采集个人信息"不是一句口号。
+#
+# 贝叶斯类型推断：由对手行为时间线更新"清库存型 vs 长期战略型"的后验
+# （§5.1 的 `competitor_intel` 剧本核心）。
+[package]
+name = "shangyi-intel"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+shangyi-gamespec = { path = "../shangyi-gamespec" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+# 公开网页抓取（`web_fetch`）：与 shangyi-llm 用同一个 HTTP 客户端，
+# 使"网络层行为"（超时、状态码处理、代理）只有一处实现。
+ureq = { version = "3", features = ["json"] }
+# `data_ingest` 侧车协议（`sidecar` 模块）：请求与响应都是 JSON。
+# 放在 dependencies（不是 dev）是因为协议解析属于产品代码，
+# 而测试用的也必须是同一条解析路径 —— 否则测的不是真实行为。
+# （原本只在 `[dev-dependencies]` 里声明；提上来后那处即冗余，已删。）
+serde_json = "1"
+
+[dev-dependencies]
+# ⚠️ 仅为**测试构建**显式启用 `serde_json/arbitrary_precision`：
+# 该 feature 在 R1（2026-11-10）前由上游 vendor crate 带入全图，摘除后消失；
+# 而 `tests/profiles.rs` 的序列化往返测试是这条兼容性规则的唯一护栏——
+# 没有它，把 `RoleSpecific` 退回 internally-tagged 不会有任何测试失败。
+# 加在 dev-deps 只影响 test profile，不改 release 二进制的数字解析语义。
+# 见 `shangyi/README.md` 的序列化规则章节与 `shangyi-gamespec/src/lib.rs` 的同款说明。
+serde_json = { version = "1", features = ["arbitrary_precision"] }

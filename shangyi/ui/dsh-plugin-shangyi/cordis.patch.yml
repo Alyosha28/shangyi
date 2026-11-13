@@ -1,0 +1,5 @@
+# 商奕领域卡片插件：挂一行 Node 半（本插件暂无 Host 逻辑，只作为 client bundle 的载体），
+# 浏览器半由 package.json 的 dsh.client 声明加载。
+- insert:
+    - id: shangyi-cards
+      name: dsh-plugin-shangyi

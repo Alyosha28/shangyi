@@ -1,0 +1,204 @@
+# 商奕 profile 的 patch 层（最后写入者赢，逐行覆盖 bundle 层的同 id 行）。
+#
+# 层序（dsh 0.2.1-rc.2，本机已核）：@deepseek-ai/dsh-base → @deepseek-ai/dsh-headless
+# → 本文件 → $DSH_HOME/cordis.patch.yml（home 层）→ --patch 叠加层。
+# 本文件只写「与 bundle 默认不同」的行；没写的行保持 bundle 的配置。
+#
+# 配置键的出处（本机已核）：
+#   - mcp-client：@deepseek-ai/dsh-mcp-client/README.md
+#   - system-prompt：@deepseek-ai/dsh-system-prompt/README.md
+#   - llm-pi-ai：@deepseek-ai/dsh-llm-pi-ai/README.md
+#   - llm-deepseek：@deepseek-ai/dsh-llm-deepseek-api-key/README.md
+#   - agent-default-model：@deepseek-ai/dsh-agent-default-model/README.md
+
+# ── 1. 领域工具：商奕 MCP 服务端（`shangyi mcp-serve`） ────────────────────────────
+#
+# 工具对模型暴露为 mcp__shangyi__<tool>（serverName=shangyi），同时暴露 MCP Resources：
+#   - shangyi://kb/<slug>（35 篇博弈论与商业分析知识库）
+#   - shangyi://playbook/<id>（4 套行业剧本）
+#   - shangyi://guide/store_location_research（门店选址规程）
+- insert:
+    - id: mcp-shangyi
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: shangyi
+        transport: stdio
+        command: !!js 'process.env.SHANGYI_BIN ?? "shangyi"'
+        args: ['mcp-serve']
+        toolCallTimeoutMs: 300000
+        failOnStartupError: true
+
+# ── 2. 部署 persona：博弈论商业/金融决策内核 ──────────────────────────────────────
+#
+# 注意：文本里不能出现双花括号模板语法（system-prompt 会当变量插值）。
+- id: system-prompt
+  config:
+    personaPrefix: |
+      你是「商奕」（ShangYi）——博弈论金融与商业决策咨询内核。你的交付物是一份
+      能回答"你凭什么"的决策咨询报告或专项测算结论：结论、依据与数字可追溯来源。
+      你不是通用编码助手，不要写代码、不要改文件、不要执行命令。
+
+      两条铁律（来自《商奕-系统设计文档-v0.3》，不可协商）：
+
+      铁律 1 · LLM 不算数。进入回答的每一个数字，都必须逐字来自一次确定性领域
+      工具调用（TrustLevel=Engine）的返回值。你不得自行计算、换算、四舍五入、
+      补全或编造任何数值、概率、赔率、收益、单价、期间总成本或盈亏平衡点；不得
+      用"大概/估计/约"把缺失的数值糊过去；不得用 0 或 1 静默填补未知项；不得把
+      上一轮你自己说过的数字当成新证据。工具没有返回数字，就如实写"未取得"，
+      并说明缺哪个输入才能取得。
+
+      铁律 2 · 关键假设必须过 checkpoint。payoff 参数、对手成本与收益估计、概率
+      与先验等硬假设，必须标注四类证据来源之一（user_confirmed / public_data /
+      prior_borrowed / llm_inferred），且阶段闸门（cp1 / cp2 / cp3）必须经真人
+      确认（actor="user"）后方可推进。调用 checkpoint 传入 items 只会打开待确认
+      关口并挂起；严禁在同一轮自行伪造确认！打开关口后必须停止调用后续阶段工具，
+      向用户清晰汇报待核准清单，等待用户通过商奕 Web 工作台点击「核准通过」、
+      执行 CLI shangyi checkpoint，或在下一轮对话明确回复确认（再凭关口打开后的
+      真实用户原句调用 checkpoint 传入 decision 与 user_quote 结算）。若缺少可
+      确认输入，则列为"未确认假设"或使用 conditional_analysis 交付条件性结论。
+
+      任务分流纪律（第一步必须调用 mcp__shangyi__select_task_scope）：
+        - 租赁/开店成本测算：scope="cost"（调 business_cost，收尾 complete_task）
+        - 公开情报/商圈核查：scope="research"（调 web_search / poi_survey /
+          kb_retrieve，收尾 complete_task）
+        - 多方博弈咨询：scope="consultation"，按需设 mode（scenario / whatif /
+          discover；whatif 须传 action）与 playbook（pricing_response /
+          market_entry / negotiation / competitor_intel），严格按阶段闸门推进。
+        - 已结案短任务若用户继续追问，先调用 reopen_task。
+
+      工具与资源纪律：决策依据只来自商奕领域工具（mcp__shangyi__*，如
+      select_task_scope、vn_map、pars_check、web_search、poi_survey、
+      kb_retrieve、swarm_run、gamespec_build、solve_equilibria、select_fuse、
+      sensitivity_scan、business_cost、constraint_register、constraint_check、
+      checkpoint、report_compile 等）及 3 个只读 MCP 资源工具
+      （list_mcp_resources / list_mcp_resource_templates / read_mcp_resource，
+      可读取 shangyi://kb/*、shangyi://playbook/* 与
+      shangyi://guide/store_location_research）。没有 shell、文件读写、子 agent
+      或 workflow 工具；需要时直接说"本部署未提供"，不得假装调用或编造 JSON。
+      若没有任何 mcp__shangyi__* 工具，直接报告"领域工具不可用，本部署无法给出
+      基于工具的判断"。
+
+      数据纪律：不编造数据、来源、引文、案例或对手行为。数据缺失、口径不明、
+      工具报错时，先如实报告缺口与错误原文，再给在该缺口下仍然成立的判断。
+      回答用中文，先给结论，再给依据与不确定性。
+
+# ── 3. 模型路由（支持本机 Magpie Gateway 与 DeepSeek 官方直连双通道） ────────────
+#
+# - 当环境变量存在 MAGPIE_GATEWAY_KEY（或显式指定 SHANGYI_PROVIDER）时，默认走本机
+#   Magpie 网关（http://127.0.0.1:3425/v1）；
+# - 未设 MAGPIE_GATEWAY_KEY 时回退到 deepseek-official（DEEPSEEK_API_KEY），保持离线
+#   冒烟契约完全兼容。
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      magpie:
+        displayName: Magpie
+        apiKeyEnv: MAGPIE_GATEWAY_KEY
+        api: openai-completions
+        baseURL: http://127.0.0.1:3425/v1
+        streamIdleTimeoutMs: 600000
+        models:
+          - id: opencode-go/deepseek-v4.1-flash
+            name: DeepSeek V4.1 Flash · OpenCode Go
+            contextWindow: 1000000
+            maxTokens: 131072
+            input: [text]
+            reasoningEfforts:
+              low: low
+              high: high
+              max: max
+          - id: auto/gemini-3.8-flash
+            name: Gemini 3.8 Flash · Magpie
+            contextWindow: 1048576
+            maxTokens: 65536
+            input: [text, image]
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+          - id: kimi/k3.1-pro
+            name: K3.1 Pro · Kimi Code
+            contextWindow: 1048576
+            maxTokens: 131072
+            input: [text, image]
+            reasoningEfforts:
+              low: low
+              high: high
+              max: max
+      magpie-responses:
+        displayName: Magpie · Responses
+        apiKeyEnv: MAGPIE_GATEWAY_KEY
+        api: openai-responses
+        baseURL: http://127.0.0.1:3425/v1
+        streamIdleTimeoutMs: 600000
+        models:
+          - id: deepseek/deepseek-flash
+            name: DeepSeek-V4.1-Flash · DeepSeek
+            contextWindow: 1048576
+            maxTokens: 131072
+            input: [text]
+            reasoningEfforts:
+              off: none
+              low: low
+              high: high
+              max: max
+            compat:
+              supportsStrictMode: true
+
+- id: llm-deepseek
+  config:
+    apiKeyEnv: DEEPSEEK_API_KEY
+    reasoningEffort: high
+
+- id: agent-default-model
+  config:
+    provider: !!js 'process.env.SHANGYI_PROVIDER ?? (process.env.MAGPIE_GATEWAY_KEY ? "magpie" : "deepseek-official")'
+    model: !!js 'process.env.SHANGYI_MODEL ?? (process.env.MAGPIE_GATEWAY_KEY ? "opencode-go/deepseek-v4.1-flash" : "deepseek-flash")'
+    reasoningEffort: high
+
+# ── 4. 关掉编码类工具（咨询内核严格零通用编码工具） ───────────────────────────────
+- id: tool-bash
+  disabled: true
+- id: bash-sandbox
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: pwsh-sandbox
+  disabled: true
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: tool-jobs
+  disabled: true
+- id: ptc-runtime
+  disabled: true
+- id: workflow-ptc
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-working-directory
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: plan-mode
+  disabled: true
+- id: tool-todo
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-web
+  disabled: true
+
+# ── 5. 收尾：关闭无 shell 服务时的 permission 预设，保持零启动告警 ───────────────
+- id: permission
+  disabled: true

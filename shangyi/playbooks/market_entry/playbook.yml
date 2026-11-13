@@ -1,0 +1,102 @@
+# 市场进入剧本：回答「该不该进、怎么进、现有玩家会怎么反击」
+meta:
+  id: market_entry
+  name: 市场进入
+  description: 进入阻止博弈 + 反击评估；开店时主动检索当地租赁挂牌与候选竞争店铺，回答「该不该进、谁会把我们挡回来」
+  order: 40
+  version: 1
+
+applicable_when:
+  - 考虑进入一个已有玩家盘踞的市场（或推出直接冲突的新品类）
+  - 在位者有可观察的反击能力（降价、渠道排他、标准、舆论）
+  - 进入需要不可逆投入（门店/产线/牌照/组织）
+fails_when:
+  - 在位者无反击能力或反击不可观察（那是单边可行性研究）
+  - 市场规则不允许进入（此时问题是合规，不是博弈）
+required_inputs:
+  - 目标市场的在位者名单
+  - 进入所需投入与回收期
+  - 在位者的反击手段与历史反击记录
+  - 本企业的进入理由
+
+value_net:
+  priority: [substitutor, customer, supplier, complementor, external]
+  scan_depth:
+    substitutor: deep
+    customer: deep
+    supplier: medium
+    complementor: medium
+    external: medium
+
+intake:
+  - id: q1
+    text: "你想进入的是什么市场？为什么现在？"
+    kind: text
+  - id: q2
+    text: "除已检索到的竞争者外，你是否掌握会改变判断的非公开竞争信息？没有可以跳过。"
+    kind: text
+  - id: q3
+    text: "你能接受的投入上限是多少？"
+    kind: text
+  - id: q4
+    text: "除公开检索结果外，你是否亲历过对手针对新店的反击？不知道可以跳过。"
+    kind: text
+  - id: q5
+    text: "你有什么他们难以复制的东西？"
+    kind: text
+  - id: q6
+    text: "如果被强力反击，你的退出成本是多少？"
+    kind: text
+
+models:
+  - entry_deterrence
+  - differentiated_bertrand
+  - repeated_game
+
+selectors:
+  risk_dom: 0.20
+  stochastic: 0.20
+  behavioral: 0.20
+  focal_llm: 0.15
+  persona_sim: 0.25
+  learning: 0.0
+
+tool_allowlist:
+  - vn_map
+  - pars_check
+  - ask_user
+  - poi_survey
+  - web_search
+  - research_record
+  - business_cost
+  - web_fetch
+  - data_ingest
+  - participant_profile_update
+  - gamespec_build
+  - gamespec_validate
+  - solve_equilibria
+  - select_equilibria
+  - select_fuse
+  - swarm_run
+  - novel_move_filter
+  - consequence_predict
+  - monte_carlo
+  - sensitivity_scan
+  - discover_satisfice
+  - preference_inject
+  - report_render
+  # R23/R24 新增：模型提议回退（用户裁决）+ recommend 阶段的产物工具。
+  # **曾经漏加**：注册表与阶段白名单都加了，唯独剧本白名单没加——
+  # 而它是第二层过滤，于是这两类工具在真实运行中**永远调不动**。
+  - recommend_build
+  - request_rewind
+  - case_store_read
+  - case_store_write
+  - kb_retrieve
+  - checkpoint
+
+report_vars:
+  deterrence_assessment: "model.entry_deterrence"
+  retaliation_paths: "consequence_predict.reactions"
+  irreversibility: "preference.sunk_cost"
+  assumption_ledger: "checkpoint.items"

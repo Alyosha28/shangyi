@@ -1,0 +1,35 @@
+{
+  "name": "dsh-plugin-shangyi-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "商奕（ShangYi）工作台主面板：在 DSH 内核里新增一个博弈分析主视图（案例 / 阶段 / 支付矩阵 / 均衡 / 选择 / 轨迹），对话面板仍保留。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  }
+}

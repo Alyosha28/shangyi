@@ -1,0 +1,33 @@
+# 商奕 LLM 接入层（设计文档 §3.3 的 LLM 抽象；Harness §10 的模型接入）。
+#
+# 【为何自建而非复用 vendor 的 codex-api】
+# Harness §10 已实测：Codex 基座**只支持 Responses API**（`wire_api = "chat"` 被硬拒），
+# 而商奕的目标端点（DeepSeek / GLM）在 A10b 实测中确认**支持 Responses**。
+# 故理论上可复用 codex-api。但本 crate 选择自建，理由是**可测试性**：
+# codex-api 的请求构造与 reqwest 传输耦合，难以注入假传输层做离线测试。
+# 自建一个薄客户端使"请求形状是否正确"可在无网络下被单元测试锁定。
+#
+# 【分工与铁律 1】
+# 本 crate 只做**传输与序列化**：构造请求、解析响应、重试。
+# 它**不做任何数值计算**——所有数字来自 shangyi-solver 等确定性引擎。
+# LLM 的输出永远是"提议"或"文本"，不是报告里的数字。
+#
+# 【关键约束（来自 A10b 实测）】
+# - `tool_choice` 仅支持 `auto` / `none`；`required` 与指定函数**恒 400**
+# - 省略 `reasoning` 回传**不会** 400（A10 的相反断言已被实测推翻）
+# - 模型名用 `/models` 实际返回的（`deepseek-flash` / `deepseek-v4-pro`）
+[package]
+name = "shangyi-llm"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ureq = { version = "3", features = ["json"] }
+
+[dev-dependencies]
+# 测试用假传输层（见 tests/），不引入额外依赖

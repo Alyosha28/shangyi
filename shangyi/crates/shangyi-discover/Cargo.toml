@@ -1,0 +1,18 @@
+# 商奕 L2 决策引擎：满意策略发现（discover 模式，设计文档 §5.6.2）。
+#
+# 理论根基：Herbert Simon 满意化（satisficing，1978 诺贝尔经济学奖）——
+# 有限理性下不求最优解、求达标解；稳健性参考 info-gap 稳健满意度思想。
+#
+# 依赖：L0 GameSpec + L2 的 consequence 管线。
+[package]
+name = "shangyi-discover"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+shangyi-gamespec = { path = "../shangyi-gamespec" }
+shangyi-consequence = { path = "../shangyi-consequence" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"

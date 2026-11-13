@@ -1,0 +1,103 @@
+# 谈判剧本：回答「怎么谈、让步空间在哪、BATNA 值多少」
+meta:
+  id: negotiation
+  name: 谈判对策
+  description: 议价博弈 + BATNA 分析；回答「怎么谈、让步空间在哪、底线在哪」
+  order: 30
+  version: 1
+
+applicable_when:
+  - 与供应商/渠道/客户/员工的**双边**议价
+  - 双方利益不完全对立（有创造价值的空间）
+  - 存在可识别的 BATNA（谈崩后各自的退路）
+fails_when:
+  - 多方同时博弈（转专用机制设计路径）
+  - 对方身份不明或代人谈判的授权范围不清
+  - 一次性、无后续关系的纯零和（此时 BATNA 分析比博弈模型更适用）
+required_inputs:
+  - 谈判对手与标的
+  - 双方 BATNA
+  - 时间压力（谁的耐心更少）
+  - 可让步的维度
+
+value_net:
+  priority: [supplier, customer, complementor]
+  scan_depth:
+    supplier: deep
+    customer: deep
+    substitutor: medium
+    complementor: medium
+    external: shallow
+
+intake:
+  - id: q1
+    text: "和谁谈、谈什么？"
+    kind: text
+  - id: q2
+    text: "如果这次谈不成，你的替代方案是什么？"
+    kind: text
+  - id: q3
+    text: "你认为对方的替代方案是什么？"
+    kind: text
+  - id: q4
+    text: "谁更急？你们的截止时间分别是什么时候？"
+    kind: text
+  - id: q5
+    text: "除了价格，还有哪些维度可以交换？"
+    kind: text
+  - id: q6
+    text: "你的底线是什么？低于什么条件你会放弃？"
+    kind: text
+
+models:
+  - rubinstein_bargaining
+  - nash_bargaining
+  - signaling_game
+
+selectors:
+  risk_dom: 0.25
+  stochastic: 0.10
+  behavioral: 0.25
+  focal_llm: 0.15
+  persona_sim: 0.25
+  learning: 0.0
+
+tool_allowlist:
+  - vn_map
+  - pars_check
+  - ask_user
+  - poi_survey
+  - web_search
+  - research_record
+  - business_cost
+  - web_fetch
+  - data_ingest
+  - participant_profile_update
+  - gamespec_build
+  - gamespec_validate
+  - solve_equilibria
+  - select_equilibria
+  - select_fuse
+  - swarm_run
+  - novel_move_filter
+  - consequence_predict
+  - monte_carlo
+  - sensitivity_scan
+  - discover_satisfice
+  - preference_inject
+  - report_render
+  # R23/R24 新增：模型提议回退（用户裁决）+ recommend 阶段的产物工具。
+  # **曾经漏加**：注册表与阶段白名单都加了，唯独剧本白名单没加——
+  # 而它是第二层过滤，于是这两类工具在真实运行中**永远调不动**。
+  - recommend_build
+  - request_rewind
+  - case_store_read
+  - case_store_write
+  - kb_retrieve
+  - checkpoint
+
+report_vars:
+  batna_comparison: "model.batna"
+  concession_path: "consequence_predict.path"
+  bottom_line: "preference.reservation"
+  assumption_ledger: "checkpoint.items"

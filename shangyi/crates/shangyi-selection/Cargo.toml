@@ -1,0 +1,20 @@
+# 商奕 L2 决策引擎：均衡选择融合与回测校准（设计文档 §5.4）。
+#
+# 依赖方向（§5.4 边界规则）：平面 B 内，依赖 L1 的 shangyi-solver 与 L0 的 shangyi-gamespec；
+# **不**依赖 vendor harness。全部数值为确定性 Rust 代码（铁律 1）。
+#
+# `focal_llm` 与 `persona_sim` 两个判据需要 LLM，但本 crate **不调用** LLM：
+# 它们作为外部适配器经 `SelectorScore` 注入（见 `adapters` 模块），
+# 使"LLM 的产出必须经回测约束"在类型层面可表达。
+[package]
+name = "shangyi-selection"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+shangyi-gamespec = { path = "../shangyi-gamespec" }
+shangyi-solver = { path = "../shangyi-solver" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"

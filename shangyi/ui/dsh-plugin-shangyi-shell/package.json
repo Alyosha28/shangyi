@@ -1,0 +1,35 @@
+{
+  "name": "dsh-plugin-shangyi-shell",
+  "version": "0.1.0",
+  "private": true,
+  "description": "商奕（ShangYi）前端外壳：在 DSH 内核的 Web GUI 上换品牌字标、空态主视觉与配色 token。不改 app root，可一键卸载回滚。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  }
+}

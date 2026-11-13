@@ -1,0 +1,28 @@
+# 商奕 L1 求解器：标准式博弈的纳什均衡求解、选择器与精炼（设计文档 §5.3/§5.4）。
+#
+# 依赖方向（§5.4 边界规则）：本 crate 属平面 B，只依赖 L0（shangyi-gamespec），
+# **不**依赖 vendor harness，也不引入任何第三方数值库——精确有理数路径全部自研
+# （GB 03 §1.7：除 CFR 外，Rust 生态无任何可用的纳什均衡求解库）。
+#
+# 黄金用例的判据见 research/harness/09-solver-test-vectors.md；
+# 容差口径见该文 §2.1 与 research/harness/10-nashpy-oracle.md §5.2。
+[package]
+name = "shangyi-solver"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+shangyi-gamespec = { path = "../shangyi-gamespec" }
+
+# lint：unsafe 禁止（与根 Cargo.toml 的 [workspace.lints] 一致，
+# 但本 crate 另加"库代码不得打印"——它是纯计算库，不产生 I/O 副作用）。
+# 注意 `print_stdout`/`print_stderr` 是 **clippy** lint，写在 [lints.rust] 下
+# 会报 unknown lint。
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+print_stdout = "deny"
+print_stderr = "deny"

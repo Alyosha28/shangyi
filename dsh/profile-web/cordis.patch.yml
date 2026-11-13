@@ -1,0 +1,214 @@
+# 商奕 Web 工作台 profile（shangyi-web）的 patch 层。
+#
+# 层序：@deepseek-ai/dsh-base → @deepseek-ai/dsh-web-app → dsh-plugin-shangyi
+#       → dsh-plugin-shangyi-shell → dsh-plugin-shangyi-workbench → 本文件。
+#
+# 设计要点（本机已核）：
+#   1) 挂载 `mcp-shangyi`（`shangyi mcp-serve`），暴露全部确定性博弈工具与 MCP Resources；
+#   2) 路由通过本机 Magpie Gateway（http://127.0.0.1:3425/v1，`MAGPIE_GATEWAY_KEY`）及
+#      `DEEPSEEK_API_KEY` 备用通道；
+#   3) 在 `@deepseek-ai/dsh-web-app` 中，会话运行于 `agent-preset` 子作用域；因此显式禁用
+#      内置通用编码预设（`preset-standard` / `preset-ptc` / `preset-minimal` / `preset-cordis`），
+#      注册唯一默认预设 `preset-shangyi`（仅含商奕 persona、受控项目级 `dsh/skills`、
+#      结构化追问工具 `tool-ask-user` 与上下文压缩，彻底剥离 bash/fs/subagent/ptc 等编码工具）。
+
+# ── 1. 商奕确定性 MCP 引擎 ─────────────────────────────────────────────────────────
+- insert:
+    - id: mcp-shangyi
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: shangyi
+        transport: stdio
+        command: !!js 'process.env.SHANGYI_BIN ?? "/tmp/shangyi-target/release/shangyi"'
+        args: ['mcp-serve']
+        toolCallTimeoutMs: 300000
+        failOnStartupError: true
+
+# ── 2. 模型路由（Magpie Gateway + DeepSeek 备用） ──────────────────────────────────
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      magpie:
+        displayName: Magpie
+        apiKeyEnv: MAGPIE_GATEWAY_KEY
+        api: openai-completions
+        baseURL: http://127.0.0.1:3425/v1
+        streamIdleTimeoutMs: 600000
+        models:
+          - id: opencode-go/deepseek-v4.1-flash
+            name: DeepSeek V4.1 Flash · OpenCode Go
+            contextWindow: 1000000
+            maxTokens: 131072
+            input: [text, image]
+            reasoningEfforts:
+              low: low
+              high: high
+              max: max
+          - id: auto/gemini-3.8-flash
+            name: Gemini 3.8 Flash · Magpie
+            contextWindow: 1048576
+            maxTokens: 65536
+            input: [text, image]
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+          - id: kimi/k3.1-pro
+            name: K3.1 Pro · Kimi Code
+            contextWindow: 1048576
+            maxTokens: 131072
+            input: [text, image]
+            reasoningEfforts:
+              low: low
+              high: high
+              max: max
+          - id: antigravity/gemini-4-carbon
+            name: Gemini 4 Carbon · Antigravity
+            contextWindow: 1048576
+            maxTokens: 262144
+            input: [text, image]
+            reasoningEfforts:
+              low: low
+              medium: medium
+              high: high
+      magpie-responses:
+        displayName: Magpie · Responses
+        apiKeyEnv: MAGPIE_GATEWAY_KEY
+        api: openai-responses
+        baseURL: http://127.0.0.1:3425/v1
+        streamIdleTimeoutMs: 600000
+        models:
+          - id: deepseek/deepseek-flash
+            name: DeepSeek-V4.1-Flash · DeepSeek
+            contextWindow: 1048576
+            maxTokens: 131072
+            input: [text, image]
+            reasoningEfforts:
+              "off": none
+              low: low
+              high: high
+              max: max
+            compat:
+              supportsStrictMode: true
+      magpie-anthropic:
+        displayName: Magpie · Anthropic
+        apiKeyEnv: MAGPIE_GATEWAY_KEY
+        api: anthropic-messages
+        baseURL: http://127.0.0.1:3425
+        streamIdleTimeoutMs: 600000
+        models:
+          - id: zcode/GLM-5.3-Flash
+            name: GLM-5.3-Flash · ZCode
+            contextWindow: 1000000
+            maxTokens: 128000
+            input: [text, image]
+            reasoningEfforts:
+              low: low
+              high: high
+              max: max
+            compat:
+              forceAdaptiveThinking: true
+
+- id: llm-deepseek
+  config:
+    apiKeyEnv: DEEPSEEK_API_KEY
+    reasoningEffort: high
+
+- id: agent-default-model
+  config:
+    provider: !!js 'process.env.SHANGYI_PROVIDER ?? (process.env.MAGPIE_GATEWAY_KEY ? "magpie" : "deepseek-official")'
+    model: !!js 'process.env.SHANGYI_MODEL ?? (process.env.MAGPIE_GATEWAY_KEY ? "opencode-go/deepseek-v4.1-flash" : "deepseek-flash")'
+    reasoningEffort: high
+
+- id: ui-settings-general
+  name: '@deepseek-ai/dsh-client-ui-settings-general'
+  config:
+    welcomeNoticeVersion: 2026-09-28.1
+
+# ── 3. 商奕专属 Agent 预设（剥离全部通用编码预设与工具） ───────────────────────────
+- id: agent-preset-registry
+  config:
+    default: shangyi
+
+- id: preset-standard
+  disabled: true
+- id: preset-ptc
+  disabled: true
+- id: preset-minimal
+  disabled: true
+- id: preset-cordis
+  disabled: true
+
+- insert:
+    - id: preset-shangyi
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: shangyi
+        name: '商奕 · 博弈决策顾问'
+        description: '确定性博弈求解 + 八阶段商业/金融决策咨询（宣纸·墨玉工作台，零通用编码工具）'
+        order: 1
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              includeRuntimeContext: false
+              prefix: |
+                你是「商奕」（ShangYi）——博弈论金融与商业决策咨询内核。你的交付物是一份能回答
+                "你凭什么"的决策咨询报告或专项测算结论：结论、依据，以及每个数字的可追溯来源。
+                你不是通用编码助手，不要写代码、不要改文件、不要执行命令。
+
+                两条铁律（来自《商奕-系统设计文档-v0.3》，不可协商）：
+
+                铁律 1 · LLM 不算数。进入回答的每一个数字，都必须逐字来自一次确定性领域
+                工具调用（TrustLevel=Engine）的返回值。你不得自行计算、换算、四舍五入、补全
+                或编造任何数值、概率、赔率、收益、单价、期间总成本或盈亏平衡点；不得用
+                "大概/估计/约"把缺失的数值糊过去；不得用 0 或 1 静默填补未知项；不得把上一轮
+                你自己说过的数字当成新证据。工具没有返回数字，就如实写"未取得"，并说明缺哪个
+                输入才能取得。
+
+                铁律 2 · 关键假设必须过 checkpoint。payoff 参数、对手成本与收益估计、概率与
+                先验等硬假设，必须标注四类证据来源之一（user_confirmed / public_data /
+                prior_borrowed / llm_inferred），且阶段闸门（cp1 / cp2 / cp3）必须经真人确认
+                （actor="user"）后方可推进。调用 checkpoint 传入 items 只会打开待确认关口并挂起；
+                严禁在同一轮自行伪造确认！打开关口后必须停止调用后续阶段工具，提醒用户可在右侧
+                「商奕工作台」点击「核准通过 / 驳回修订」按钮，或直接在对话框回复确认（下一轮再凭
+                关口打开后的真实用户原句调用 checkpoint 传入 decision 与 user_quote 结算）。
+
+                任务分流与技能纪律：
+                1) 第一步必须调用 mcp__shangyi__select_task_scope（cost / research / consultation，
+                   按需指定 mode=scenario|whatif|discover 与 playbook）。
+                2) 遇到多阶段博弈或门店选址/商圈租赁任务时，可按需调用 skill 工具加载
+                   shangyi-consultation-discipline 或 shangyi-store-location 技能规程，也可通过
+                   read_mcp_resource 读取 shangyi://kb/* 与 shangyi://playbook/*。
+                3) 短任务结束时调用 complete_task；后续追问先调用 reopen_task。
+                回答使用清晰中文，先给结论，再列出引擎依据、假设来源与敏感度/不确定性边界。
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+            config:
+              includeDefaultRoots: false
+              customSkillDirs:
+                - !!js 'process.env.SHANGYI_SKILL_DIR ?? (process.env.SHANGYI_ROOT ? process.env.SHANGYI_ROOT + "/dsh/skills" : process.cwd() + "/dsh/skills")'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024

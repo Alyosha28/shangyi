@@ -1,0 +1,28 @@
+# 商奕（ShangYi）workspace
+#
+# 架构（设计文档 §6，R1 修订）：**内核自研，无 vendor 基座**。
+#   - 本 workspace 只含商奕自有 crate（`shangyi/crates/*`），互相之间只用 path 依赖。
+#   - 历史：R1 之前内核对位于 `vendor/` 的上游基线镜像存在 path 依赖（连同为凑齐其
+#     依赖解析而抄下来的整组钉版与 git patch）。R1 已把该依赖、`vendor/` 目录、
+#     钉版段与 patch 段**一并摘除**；变更记录见 `docs/` 下的内核改造变更文档。
+#   - 护栏（硬性，非约定）：历史基座的 crate 名不得再出现在本文件、`Cargo.lock`
+#     或 `shangyi/**/Cargo.toml` 中。该规则由 `tools/loop/check-no-harness.py`
+#     强制（命中即非零退出、CI 应失败）；`cargo test` 侧的进程内快速版见
+#     `shangyi-core` 的 `no_external_harness_in_manifests` 测试。
+#   - 另一道护栏：`serde_json/arbitrary_precision` 只允许出现在**测试构建**
+#     （`shangyi-gamespec` / `shangyi-intel` 的 `[dev-dependencies]`），
+#     不得进入正式依赖图——`tools/loop/check-features.py` 双向检查（P1-1）。
+#   - 构建：一律走 `tools/loop/build.sh <cargo 参数...>`。该包装器默认把
+#     `CARGO_TARGET_DIR` 指到 `/tmp/shangyi-target`——本项目位于外接挂载盘，其驱动
+#     会为每个文件生成 AppleDouble `._*` 伴随文件，target 落在挂载盘上会被污染。
+[workspace]
+resolver = "2"
+members = ["shangyi/crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
