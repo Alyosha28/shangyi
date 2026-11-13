@@ -119,7 +119,7 @@ function independentProgress(events) {
 
   let status = null
   if (phase === 'archived') status = 'done'
-  else if (openIds.length > 0) status = 'stuck'
+  else if (openIds.length > 0) status = 'waiting'
   else if (failed) status = 'stuck'
   else if (openTurn) status = 'running'
   return { phase, status, pending: openIds[openIds.length - 1] || null, lastEvent: last && last.type }
@@ -141,7 +141,7 @@ check('案例摘要：字段齐全 + 与独立推导逐条一致', () => {
     assert.equal(c.caseId, d.caseId, `第 ${i} 条案例对不上：${c.caseId} vs ${d.caseId}`)
     assert.ok('phase' in c, `缺 phase：${c.caseId}`)
     assert.ok('status' in c, `缺 status：${c.caseId}`)
-    assert.ok([null, 'running', 'done', 'stuck'].includes(c.status), `status 非法：${c.caseId} → ${c.status}`)
+    assert.ok([null, 'running', 'waiting', 'done', 'stuck'].includes(c.status), `status 非法：${c.caseId} → ${c.status}`)
 
     const events = mod.readCase(d.log).events
     const want = independentProgress(events)
@@ -151,10 +151,10 @@ check('案例摘要：字段齐全 + 与独立推导逐条一致', () => {
     assert.equal(c.lastEvent, want.lastEvent, `lastEvent 不一致：${c.caseId}`)
     compared++
     dist[c.status] = (dist[c.status] || 0) + 1
-    if (c.status === 'stuck') rows.push(`${c.caseId.slice(0, 34)} phase=${c.phase} pending=${c.pendingCheckpoint} lastToolOk=${c.lastToolOk}`)
+    if (c.status === 'stuck' || c.status === 'waiting') rows.push(`${c.caseId.slice(0, 34)} status=${c.status} phase=${c.phase} pending=${c.pendingCheckpoint} lastToolOk=${c.lastToolOk}`)
   }
   return `${compared}/${cases.length} 条逐条对拍通过；status 分布 ${JSON.stringify(dist)}` +
-    (rows.length ? `\n  stuck 明细：\n  ` + rows.join('\n  ') : '')
+    (rows.length ? `\n  waiting/stuck 明细：\n  ` + rows.join('\n  ') : '')
 })
 
 // ── 4. 卡片投影向后兼容 ─────────────────────────────────────────────────────

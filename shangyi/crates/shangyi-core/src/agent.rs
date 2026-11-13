@@ -57,6 +57,7 @@ pub struct ToolCall {
 pub enum ExecOutcome {
     TaskScopeSelected { scope: crate::task_scope::TaskScope, reason: String },
     ScopedTaskCompleted(crate::task_scope::ScopedTaskResult),
+    FollowupTaskRequested { reason: Option<String> },
     InsufficientEvidence { gaps: Vec<crate::conditional::EvidenceGap> },
     /// 成功。`output` 是回灌给模型的文本（通常是 JSON）。
     Ok(String),
@@ -1303,6 +1304,19 @@ impl<'a, T: Transport> AgentLoop<'a, T> {
                         }
                         Err(error) => ExecOutcome::Failed(error.to_string()),
                     },
+                    ExecOutcome::FollowupTaskRequested { reason } => match machine.begin_followup_task() {
+                        Ok(()) => {
+                            self.begin_followup_task();
+                            let _ = self.executor.take_invalidated_artifacts();
+                            self.emit_event(Event::FollowupTaskStarted { at: self.now() });
+                            ExecOutcome::Ok(serde_json::json!({
+                                "reopened": true,
+                                "phase": machine.phase().as_str(),
+                                "reason": reason,
+                            }).to_string())
+                        }
+                        Err(error) => ExecOutcome::Failed(error.to_string()),
+                    },
                     ExecOutcome::InsufficientEvidence { gaps } => {
                         if gaps.is_empty() {ExecOutcome::Failed("缺少类型化证据缺口，不能转入条件分析".into())}
                         else {
@@ -1359,7 +1373,11 @@ impl<'a, T: Transport> AgentLoop<'a, T> {
                 };
 
                 let (feed, log_outcome) = match outcome {
-                    ExecOutcome::TaskScopeSelected { .. } | ExecOutcome::ScopedTaskCompleted(_) => unreachable!("scope outcomes handled before ordinary tool output"),
+                    ExecOutcome::TaskScopeSelected { .. }
+                    | ExecOutcome::ScopedTaskCompleted(_)
+                    | ExecOutcome::FollowupTaskRequested { .. } => {
+                        unreachable!("scope outcomes handled before ordinary tool output")
+                    }
                     ExecOutcome::InsufficientEvidence { gaps } => (
                         format!("关键证据未取得：{}。不能填零、删除对手或改成背景方以通过校验；可补真实来源，或调用 conditional_analysis 正式交付已有费用、条件比较及信息收集步骤。相同缺口最多三次。",serde_json::to_string(&gaps).expect("gap serialization")),
                         ToolOutcome::InsufficientEvidence {gaps},

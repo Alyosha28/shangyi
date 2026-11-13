@@ -277,7 +277,8 @@ impl<R: BufRead, W: Write> Server<R, W> {
         );
         instructions.push_str(
             "`intake` 阶段先调用 `select_task_scope` 选择任务范围（可同时传入 `mode`、`playbook`、`action` \
-             动态选定问法与行业剧本）；在此之前除 `ask_user` 外的域工具都会被拒绝。\n",
+             动态选定问法与行业剧本）；在此之前除 `ask_user` 外的域工具都会被拒绝。短任务结案（`complete_task`）\
+             或条件分析交付后若用户继续追问，先调用 `begin_followup_task` 再调用 `select_task_scope`。\n",
         );
         instructions.push_str(
             "本服务端同时通过 MCP Resources（`resources/list` / `resources/read`）暴露 35 篇博弈论知识库\
@@ -288,7 +289,8 @@ impl<R: BufRead, W: Write> Server<R, W> {
             "工具结果里出现 `\"needs_user_input\": true` 表示需要**转达用户并等待回答**\
              （确认 / 采集 / 提议回退），那不是失败。关口确认（cp1/cp2/cp3）可由用户在工作台点击核准\
              （服务端自动同步），或在真实用户回复确认后再次调用 `checkpoint`（传 `decision` + 逐字 `user_quote`）\
-             结算；严禁模型在用户未回复前自行代批。`\"blocked\": true` 表示外部依赖不可用（未取得），\
+             结算；回退提议（`request_rewind`）同样须在真实用户回复后以 `decision` + `user_quote` 结算。\
+             严禁模型在用户未回复前自行代批。`\"blocked\": true` 表示外部依赖不可用（未取得），\
              也不是失败，不得用推测填补。\n",
         );
         if let Some(v) = &requested {

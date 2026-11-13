@@ -125,8 +125,14 @@ struct Rendered {
 }
 
 /// 会话宿主。
+#[derive(Debug, Clone)]
+struct PendingRewind {
+    from: SessionPhase,
+    target: SessionPhase,
+    reason: String,
+}
+
 pub struct SessionHost {
-    #[allow(dead_code)]
     theory: &'static TheoryLibrary,
     playbook: &'static Playbook,
     #[allow(dead_code)]
@@ -151,6 +157,9 @@ pub struct SessionHost {
     action: Option<String>,
     trusted_inputs_lines_read: usize,
     post_checkpoint_user_messages: Vec<String>,
+    pending_rewind: Option<PendingRewind>,
+    post_rewind_user_messages: Vec<String>,
+    post_completion_user_messages: Vec<String>,
 }
 
 impl SessionHost {
@@ -269,6 +278,9 @@ impl SessionHost {
             action: None,
             trusted_inputs_lines_read: initial_offset,
             post_checkpoint_user_messages: Vec::new(),
+            pending_rewind: None,
+            post_rewind_user_messages: Vec::new(),
+            post_completion_user_messages: Vec::new(),
         })
     }
 
@@ -343,6 +355,10 @@ impl SessionHost {
         let mut call_seq = 0u64;
         let mut action: Option<String> = None;
         let mut post_checkpoint_user_messages: Vec<String> = Vec::new();
+        let mut pending_rewind: Option<PendingRewind> = None;
+        let mut post_rewind_user_messages: Vec<String> = Vec::new();
+        let mut post_completion_user_messages: Vec<String> = Vec::new();
+        let mut pending_external_cp_advance = false;
         let mut recorded_user_texts: Vec<String> = Vec::new();
 
         // 离线确定性重放历史事件以重建 DomainExecutor 与 PhaseMachine 状态
@@ -362,6 +378,12 @@ impl SessionHost {
                     }
                     if user_actor == "user" && has_open_checkpoint(&machine) {
                         post_checkpoint_user_messages.push(text.clone());
+                    }
+                    if user_actor == "user" && pending_rewind.is_some() {
+                        post_rewind_user_messages.push(text.clone());
+                    }
+                    if user_actor == "user" && machine.scoped_result().is_some() {
+                        post_completion_user_messages.push(text.clone());
                     }
                 }
                 Event::PlaybookSelected { id, .. } => {
@@ -408,6 +430,9 @@ impl SessionHost {
                                     if let Some(sc) = prev_scope {
                                         let _ = machine.select_task_scope(sc);
                                     }
+                                    for (kind, fp) in executor.artifacts() {
+                                        machine.record(kind, fp);
+                                    }
                                 }
                             }
                             if let Some(pb_id) = args.get("playbook").and_then(Value::as_str) {
@@ -424,7 +449,28 @@ impl SessionHost {
                             }
                         }
                         if let ToolOutcome::Ok { output } = outcome {
-                            if tool_name == "web_fetch" {
+                            if tool_name == "request_rewind" {
+                                if let Some(target_str) = output.strip_prefix("PENDING_REWIND_DECISION:") {
+                                    if let Some(target) = parse_session_phase(target_str.trim()) {
+                                        let reason = args
+                                            .get("reason")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or_default()
+                                            .to_string();
+                                        pending_rewind = Some(PendingRewind {
+                                            from: machine.phase(),
+                                            target,
+                                            reason,
+                                        });
+                                        post_rewind_user_messages.clear();
+                                    }
+                                } else if output.starts_with("REWIND_APPROVED:")
+                                    || output.starts_with("REWIND_REJECTED:")
+                                {
+                                    pending_rewind = None;
+                                    post_rewind_user_messages.clear();
+                                }
+                            } else if tool_name == "web_fetch" {
                                 let req_url =
                                     args.get("url").and_then(Value::as_str).unwrap_or_default();
                                 executor.restore_fetched_page(req_url, output);
@@ -448,9 +494,19 @@ impl SessionHost {
                     } else {
                         let _ = machine.finish_scoped_task(result.clone());
                     }
+                    post_completion_user_messages.clear();
                 }
                 Event::FollowupTaskStarted { .. } => {
                     let _ = machine.begin_followup_task();
+                    ToolExecutor::begin_followup_task(&mut executor);
+                    for msg in post_completion_user_messages.drain(..) {
+                        executor.seed_followup_request_text(&msg);
+                    }
+                    let _ = ToolExecutor::take_invalidated_artifacts(&mut executor);
+                    pending_rewind = None;
+                    post_rewind_user_messages.clear();
+                    post_checkpoint_user_messages.clear();
+                    pending_external_cp_advance = false;
                 }
                 Event::CheckpointOpened {
                     id, phase, items, ..
@@ -484,6 +540,7 @@ impl SessionHost {
                                 }
                             }
                             post_checkpoint_user_messages.clear();
+                            pending_external_cp_advance = false;
                         }
                     }
                 }
@@ -512,6 +569,7 @@ impl SessionHost {
                                 },
                             );
                             post_checkpoint_user_messages.clear();
+                            pending_external_cp_advance = false;
                         } else {
                             let fp = machine.artifact_fingerprint();
                             let _ = machine.settle_checkpoint(
@@ -523,6 +581,7 @@ impl SessionHost {
                                 },
                             );
                             post_checkpoint_user_messages.clear();
+                            pending_external_cp_advance = true;
                         }
                     }
                 }
@@ -532,10 +591,17 @@ impl SessionHost {
                             let _ = machine.advance_to(target).or_else(|_| machine.advance());
                         }
                     }
+                    pending_external_cp_advance = false;
                 }
                 Event::PhaseRewound { to, .. } => {
                     if let Some(target) = parse_session_phase(to) {
-                        let _ = machine.rollback_to(target);
+                        if let Ok(cleared) = machine.rollback_to(target) {
+                            executor.clear_artifact_keys(&cleared);
+                        }
+                        pending_rewind = None;
+                        post_rewind_user_messages.clear();
+                        post_checkpoint_user_messages.clear();
+                        pending_external_cp_advance = false;
                     }
                 }
                 _ => {}
@@ -543,22 +609,24 @@ impl SessionHost {
         }
 
         // 若恢复前外部（Web UI / CLI）刚刚追加了 CheckpointAnswered 但尚未写 PhaseEntered，
-        // 在恢复完成时自动补齐推进。
-        if let Some(cp_id) = machine.graph().checkpoint_at(machine.phase()) {
-            if matches!(
-                machine.checkpoint_status(cp_id),
-                Some(CheckpointStatus::Approved { .. })
-            ) {
-                let from = machine.phase();
-                if let Ok(to) = machine.advance() {
-                    let now = SystemClock.now_iso8601();
-                    let _ = log.append_durable(Event::PhaseEntered {
-                        from: from.as_str().to_string(),
-                        to: to.as_str().to_string(),
-                        playbook: mode.as_str().to_string(),
-                        reason: "闸门通过（外部确认恢复推进）".to_string(),
-                        at: now,
-                    });
+        // 在恢复完成时自动补齐推进（回退到某阶段后不得因更早历史上的批准再次误推）。
+        if pending_external_cp_advance {
+            if let Some(cp_id) = machine.graph().checkpoint_at(machine.phase()) {
+                if matches!(
+                    machine.checkpoint_status(cp_id),
+                    Some(CheckpointStatus::Approved { .. })
+                ) {
+                    let from = machine.phase();
+                    if let Ok(to) = machine.advance() {
+                        let now = SystemClock.now_iso8601();
+                        let _ = log.append_durable(Event::PhaseEntered {
+                            from: from.as_str().to_string(),
+                            to: to.as_str().to_string(),
+                            playbook: mode.as_str().to_string(),
+                            reason: "闸门通过（外部确认恢复推进）".to_string(),
+                            at: now,
+                        });
+                    }
                 }
             }
         }
@@ -589,6 +657,9 @@ impl SessionHost {
             action,
             trusted_inputs_lines_read: initial_offset,
             post_checkpoint_user_messages,
+            pending_rewind,
+            post_rewind_user_messages,
+            post_completion_user_messages,
         })
     }
 
@@ -708,11 +779,15 @@ impl SessionHost {
 
         // ── 闸门 1：任务范围 ──
         let rejection: Option<String> = if !self.machine.allows_task_tool(name) {
-            Some(
+            let reason = if name == "begin_followup_task" {
+                "当前尚有未完成的任务轮次，无需开启后续任务；请先完成或交付当前任务。"
+            } else if name == "select_task_scope" && self.machine.scoped_result().is_some() {
+                "当前任务已交付完成；若用户提出了新的追问或后续请求，请先调用 begin_followup_task 开启后续任务，再调用 select_task_scope 重新定界（已有证据将保留）。"
+            } else {
                 "该工具不属于用户当前任务范围；仅查资料/算费用时不得扩大为完整咨询。\
                  未选择范围时先用 select_task_scope。"
-                    .to_string(),
-            )
+            };
+            Some(reason.to_string())
         } else {
             // ── 闸门 2：注册表（阶段白名单 + 剧本白名单） ──
             match self
@@ -741,6 +816,9 @@ impl SessionHost {
             }
             None if name == "checkpoint" && arguments.get("decision").is_some() => {
                 self.settle_conversational_checkpoint(&arguments, phase_before, &at)
+            }
+            None if name == "request_rewind" && arguments.get("decision").is_some() => {
+                self.settle_conversational_rewind(&arguments, phase_before, &at)
             }
             None => {
                 let call = ToolCall {
@@ -1061,6 +1139,176 @@ impl SessionHost {
         }
     }
 
+    fn settle_conversational_rewind(
+        &mut self,
+        arguments: &Value,
+        phase: SessionPhase,
+        at: &str,
+    ) -> Rendered {
+        let decision = match arguments.get("decision").and_then(Value::as_str) {
+            Some(d @ ("approve" | "reject")) => d,
+            _ => {
+                let err = "`request_rewind.decision` 只能为 `\"approve\"` 或 `\"reject\"`".to_string();
+                return Rendered {
+                    is_error: true,
+                    content: vec![format!("工具 `request_rewind` 调用失败：{err}")],
+                    suspend: true,
+                    log_outcome: ToolOutcome::Failed { error: err },
+                };
+            }
+        };
+
+        let user_quote = match arguments
+            .get("user_quote")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| s.chars().filter(|c| !c.is_whitespace()).count() >= 2)
+        {
+            Some(q) => q.to_string(),
+            None => {
+                let err = "通过对话结算 `request_rewind` 时必须提供不少于 2 个非空字符的 `user_quote`（用户在提出回退提议之后回复的真实原文片段）".to_string();
+                return Rendered {
+                    is_error: true,
+                    content: vec![format!("工具 `request_rewind` 调用失败：{err}")],
+                    suspend: true,
+                    log_outcome: ToolOutcome::Failed { error: err },
+                };
+            }
+        };
+        if user_quote.contains(['?', '？', '吗']) {
+            let err = "疑问句不能作为回退确认凭据（`user_quote` 含疑问词/问号）".to_string();
+            return Rendered {
+                is_error: true,
+                content: vec![format!("工具 `request_rewind` 调用失败：{err}")],
+                suspend: true,
+                log_outcome: ToolOutcome::Failed { error: err },
+            };
+        }
+
+        let Some(pending) = self.pending_rewind.clone() else {
+            let err = "当前没有待用户确认的阶段回退请求；请先携带 `target` 与 `reason` 调用 `request_rewind` 向用户提出回退提议并等待回复".to_string();
+            return Rendered {
+                is_error: true,
+                content: vec![format!("工具 `request_rewind` 调用失败：{err}")],
+                suspend: true,
+                log_outcome: ToolOutcome::Failed { error: err },
+            };
+        };
+
+        if let Some(target_val) = arguments.get("target").filter(|v| !v.is_null()) {
+            let target_str = target_val.as_str().map(str::trim).unwrap_or("");
+            if parse_session_phase(target_str) != Some(pending.target) {
+                let err = format!(
+                    "待确认的回退目标阶段是 `{}`，而非 `{target_str}`",
+                    pending.target.as_str()
+                );
+                return Rendered {
+                    is_error: true,
+                    content: vec![format!("工具 `request_rewind` 调用失败：{err}")],
+                    suspend: true,
+                    log_outcome: ToolOutcome::Failed { error: err },
+                };
+            }
+        }
+
+        let verified = self.post_rewind_user_messages.iter().any(|msg| {
+            msg.match_indices(&user_quote).any(|(pos, _)| {
+                if decision != "approve" {
+                    return true;
+                }
+                let prefix = msg[..pos].trim_end();
+                !["不", "未", "别", "勿", "没", "并非", "不要", "拒绝", "驳回"]
+                    .iter()
+                    .any(|neg| prefix.ends_with(neg))
+            })
+        });
+        if !verified {
+            let err = format!(
+                "拒绝执行 `request_rewind` 阶段回退（铁律 2 强制门禁）：未在回退提议发出之后的真实用户消息中找到原文片段 `{user_quote}`。\
+                 严禁模型自行代批或引用回退提议前的旧消息；请先等待用户真实确认回复。"
+            );
+            return Rendered {
+                is_error: true,
+                content: vec![err.clone()],
+                suspend: true,
+                log_outcome: ToolOutcome::Failed { error: err },
+            };
+        }
+
+        match decision {
+            "approve" => match self.machine.rollback_to(pending.target) {
+                Ok(cleared) => {
+                    self.executor.clear_artifact_keys(&cleared);
+                    self.pending_rewind = None;
+                    self.post_rewind_user_messages.clear();
+                    self.post_checkpoint_user_messages.clear();
+                    let log_reason = if pending.reason.is_empty() {
+                        user_quote.clone()
+                    } else {
+                        format!("{}（用户确认：{user_quote}）", pending.reason)
+                    };
+                    self.append_event(Event::PhaseRewound {
+                        from: phase.as_str().to_string(),
+                        to: pending.target.as_str().to_string(),
+                        due_to: log_reason,
+                        at: at.to_string(),
+                    });
+                    let out = json!({
+                        "kind": "rewind",
+                        "decision": "approve",
+                        "from_phase": phase.as_str(),
+                        "proposed_from": pending.from.as_str(),
+                        "target_phase": pending.target.as_str(),
+                        "cleared_artifacts": cleared,
+                        "approved_by": "user",
+                        "user_quote": user_quote,
+                        "note": "已按用户明确同意回退到目标阶段并清理下游产物；请仅在当前回退后的阶段继续修改或重新推进。",
+                    })
+                    .to_string();
+                    Rendered {
+                        is_error: false,
+                        content: vec![out],
+                        suspend: true,
+                        log_outcome: ToolOutcome::Ok {
+                            output: format!("REWIND_APPROVED:{}", pending.target.as_str()),
+                        },
+                    }
+                }
+                Err(e) => Rendered {
+                    is_error: true,
+                    content: vec![format!("工具 `request_rewind` 执行回退失败：{e}")],
+                    suspend: true,
+                    log_outcome: ToolOutcome::Failed {
+                        error: e.to_string(),
+                    },
+                },
+            },
+            "reject" => {
+                self.pending_rewind = None;
+                self.post_rewind_user_messages.clear();
+                let out = json!({
+                    "kind": "rewind",
+                    "decision": "reject",
+                    "phase": phase.as_str(),
+                    "target_phase": pending.target.as_str(),
+                    "rejected_by": "user",
+                    "reason": user_quote,
+                    "note": "用户已拒绝本次阶段回退，维持当前阶段继续。",
+                })
+                .to_string();
+                Rendered {
+                    is_error: false,
+                    content: vec![out],
+                    suspend: true,
+                    log_outcome: ToolOutcome::Ok {
+                        output: format!("REWIND_REJECTED:{}", pending.target.as_str()),
+                    },
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
     // ── 外部事件同步（DSH 用户消息账本 + Web/CLI 关口确认） ──
 
     fn sync_external_inputs(&mut self, now_at: &str) {
@@ -1113,6 +1361,12 @@ impl SessionHost {
                     if has_open_checkpoint(&self.machine) {
                         self.post_checkpoint_user_messages.push(text.to_string());
                     }
+                    if self.pending_rewind.is_some() {
+                        self.post_rewind_user_messages.push(text.to_string());
+                    }
+                    if self.machine.scoped_result().is_some() {
+                        self.post_completion_user_messages.push(text.to_string());
+                    }
                     self.append_or_buffer_event(Event::UserInputRecorded {
                         text: text.to_string(),
                         user_actor: "user".to_string(),
@@ -1142,6 +1396,12 @@ impl SessionHost {
                 } => {
                     self.executor.record_trusted_user_input(&text, &user_actor);
                     self.apply_executor_invalidations(&at);
+                    if user_actor == "user" && self.pending_rewind.is_some() {
+                        self.post_rewind_user_messages.push(text.clone());
+                    }
+                    if user_actor == "user" && self.machine.scoped_result().is_some() {
+                        self.post_completion_user_messages.push(text.clone());
+                    }
                     if user_actor == "user" && has_open_checkpoint(&self.machine) {
                         self.post_checkpoint_user_messages.push(text);
                     }
@@ -1369,6 +1629,7 @@ impl SessionHost {
                 };
                 match applied {
                     Ok(()) => {
+                        self.post_completion_user_messages.clear();
                         let receipt = serde_json::to_string(&result)
                             .unwrap_or_else(|e| format!("{{\"serialization_error\":\"{e}\"}}"));
                         self.append_event(Event::ScopedTaskCompleted {
@@ -1380,6 +1641,46 @@ impl SessionHost {
                             content: vec![receipt.clone()],
                             suspend: false,
                             log_outcome: ToolOutcome::Ok { output: receipt },
+                        }
+                    }
+                    Err(e) => Rendered {
+                        is_error: true,
+                        content: vec![format!("工具 `{name}` 调用失败：{e}")],
+                        suspend: true,
+                        log_outcome: ToolOutcome::Failed {
+                            error: e.to_string(),
+                        },
+                    },
+                }
+            }
+            ExecOutcome::FollowupTaskRequested { reason } => {
+                match self.machine.begin_followup_task() {
+                    Ok(()) => {
+                        ToolExecutor::begin_followup_task(&mut self.executor);
+                        for msg in std::mem::take(&mut self.post_completion_user_messages) {
+                            self.executor.seed_followup_request_text(&msg);
+                        }
+                        let _ = ToolExecutor::take_invalidated_artifacts(&mut self.executor);
+                        self.pending_rewind = None;
+                        self.post_rewind_user_messages.clear();
+                        self.post_checkpoint_user_messages.clear();
+                        self.append_event(Event::FollowupTaskStarted {
+                            at: at.to_string(),
+                        });
+                        let out = json!({
+                            "reopened": true,
+                            "phase": self.machine.phase().as_str(),
+                            "reason": reason,
+                            "evidence_preserved": true,
+                            "note": "已结束上一任务并重置到 intake；历史核实证据与页面缓存已保留。\
+                                     请立即调用 select_task_scope 为用户新请求重新定界。",
+                        })
+                        .to_string();
+                        Rendered {
+                            is_error: false,
+                            content: vec![out.clone()],
+                            suspend: false,
+                            log_outcome: ToolOutcome::Ok { output: out },
                         }
                     }
                     Err(e) => Rendered {
@@ -1420,22 +1721,33 @@ impl SessionHost {
                     },
                 }
             }
-            ExecOutcome::RewindRequest { target, reason } => Rendered {
-                is_error: false,
-                content: vec![json!({
-                    "needs_user_input": true,
-                    "kind": "rewind_request",
-                    "target_phase": target.as_str(),
-                    "reason": reason,
-                    "note": "模型**提议**回退到更早阶段，决定权在用户。\
-                             服务端本轮不执行回退（回退会作废已完成的工作，须用户知情同意）。",
-                })
-                .to_string()],
-                suspend: true,
-                log_outcome: ToolOutcome::Ok {
-                    output: format!("PENDING_REWIND_DECISION:{}", target.as_str()),
-                },
-            },
+            ExecOutcome::RewindRequest { target, reason } => {
+                let from = self.machine.phase();
+                self.pending_rewind = Some(PendingRewind {
+                    from,
+                    target,
+                    reason: reason.clone(),
+                });
+                self.post_rewind_user_messages.clear();
+                Rendered {
+                    is_error: false,
+                    content: vec![json!({
+                        "needs_user_input": true,
+                        "kind": "rewind_request",
+                        "from_phase": from.as_str(),
+                        "target_phase": target.as_str(),
+                        "reason": reason,
+                        "note": "模型**提议**回退到更早阶段，决定权在用户。\
+                                 服务端本轮不执行回退（回退会作废已完成的工作，须用户知情同意）。\
+                                 请在用户明确回复后再次调用 request_rewind(decision=\"approve\"|\"reject\", user_quote=\"用户原话\") 结算。",
+                    })
+                    .to_string()],
+                    suspend: true,
+                    log_outcome: ToolOutcome::Ok {
+                        output: format!("PENDING_REWIND_DECISION:{}", target.as_str()),
+                    },
+                }
+            }
             ExecOutcome::NeedsUserInput(req) => self.bookkeep_checkpoint(req, at),
         }
     }

@@ -69,6 +69,60 @@
       cost: "费用测算"
     };
 
+    SYData.PLAYBOOK_LABELS = {
+      pricing_response: "调价 / 促销响应",
+      market_entry: "市场进入",
+      negotiation: "谈判对策",
+      competitor_intel: "竞对情报"
+    };
+
+    SYData.EQ_KIND_LABELS = {
+      Pure: "纯策略",
+      pure: "纯策略",
+      Mixed: "混合策略",
+      mixed: "混合策略"
+    };
+
+    SYData.SOLVE_ROUTE_LABELS = {
+      SupportEnumeration: "支持枚举（精确）",
+      LemkeHowson: "Lemke–Howson（交叉检查）",
+      Analytic: "解析求根"
+    };
+
+    SYData.COMPLETENESS_LABELS = {
+      Complete: "完备",
+      Partial: "不完备",
+      NotGuaranteed: "不保证完备"
+    };
+
+    SYData.playbookLabel = function (v) {
+      return v ? (SYData.PLAYBOOK_LABELS[v] || v) : v;
+    };
+
+    SYData.eqKindLabel = function (v) {
+      return v ? (SYData.EQ_KIND_LABELS[v] || v) : v;
+    };
+
+    SYData.solveRouteLabel = function (v) {
+      return v ? (SYData.SOLVE_ROUTE_LABELS[v] || v) : v;
+    };
+
+    SYData.completenessLabel = function (v) {
+      if (!v) return v;
+      if (SYData.COMPLETENESS_LABELS[v]) return SYData.COMPLETENESS_LABELS[v];
+      var s = String(v);
+      if (s.indexOf("Partial") === 0) {
+        var m = s.match(/unsupported:\s*(\d+),\s*underdetermined:\s*(\d+),\s*ghost:\s*(\d+)/);
+        if (m) return "部分完备（超范围 " + m[1] + " · 欠定 " + m[2] + " · 幽灵 " + m[3] + "）";
+        return "部分完备";
+      }
+      if (s.indexOf("NotGuaranteed") === 0) {
+        var am = s.match(/algorithm:\s*"([^"]+)"/);
+        return am ? "不保证完备（" + am[1] + "）" : "不保证完备";
+      }
+      return s;
+    };
+
     SYData.SCOPE_LABELS = {
       consultation: "完整博弈咨询",
       research: "调研快答",

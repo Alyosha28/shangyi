@@ -272,7 +272,10 @@ function textOf(node) {
   if (!node || typeof node !== 'object') return ''
   // 函数组件：在隔离的 hook 作用域里展开成元素树，再继续读文本。
   if (typeof node.type === 'function') {
-    return textOf(activeIsolate(function () { return node.type(node.props) }))
+    const propsWithChildren = node.children && node.children.length
+      ? Object.assign({ children: node.children }, node.props)
+      : node.props
+    return textOf(activeIsolate(function () { return node.type(propsWithChildren) }))
   }
   const own = node.children ? node.children.map(textOf).join(' ') : ''
   return own
@@ -585,10 +588,77 @@ check('知识库全文阅读抽屉可按需展开', () => {
   assert.ok(textOf(drawers[0]).includes('为什么这一步不能交给模型自由发挥'))
 })
 
+check('P0 #3: waiting 状态渲染琥珀「待确认」与 stuck 渲染红牌「卡住」区分', () => {
+  const waitTag = SYView.statusTag('waiting')
+  const stuckTag = SYView.statusTag('stuck')
+  assert.ok(waitTag && waitTag.props.tone === 'warn')
+  assert.equal(textOf(waitTag), '待确认')
+  assert.ok(stuckTag && stuckTag.props.tone === 'err')
+  assert.equal(textOf(stuckTag), '卡住')
+  const itemText = textOf(SYView.caseItem({
+    caseId: 'c_wait', mode: 'consult', phase: 'intel', events: 3,
+    hasMatrix: false, hasSolve: false, status: 'waiting'
+  }, false, stubActions))
+  assert.ok(itemText.includes('待确认'), itemText)
+})
+
+check('P0 #2: openConversation 调用 selectPanel("conversation") 且审批完成横幅带回到对话按钮', () => {
+  const vmDone = vmOf(Object.assign({}, vmData, {
+    tab: 'overview',
+    cpForm: { note: '', phase: 'done', message: '已核准通过（seq 6）', error: null },
+    actions: Object.assign({}, stubActions, {
+      openConversation() { clicked = true }
+    })
+  }))
+  let clicked = false
+  const cpTree = SYView.checkpointCard(vmDone)
+  const backBtns = findByClass(cpTree, 'sy-btn').filter((b) => textOf(b).includes('回到对话面板'))
+  assert.equal(backBtns.length, 1, '审批完成横幅应包含「回到对话面板」按钮')
+  backBtns[0].props.onClick()
+  assert.equal(clicked, true)
+  const panelSrc = fs.readFileSync(new URL('../src/50-panel.js', import.meta.url), 'utf8')
+  assert.ok(!panelSrc.includes('selectPanel(null)'), '50-panel.js 不得传 selectPanel(null)')
+  assert.ok(panelSrc.includes('selectPanel("conversation")'), '50-panel.js 必须传 selectPanel("conversation")')
+})
+
+check('P0 #4: badLines === 0 时不误显「坏行 0」，> 0 时如实提示，且英文枚举全部中文翻译', () => {
+  const cleanOverview = SYView.overview(vmData)
+  const cleanText = textOf(cleanOverview)
+  assert.ok(!cleanText.includes('坏行 0'), 'badLines=0 不得出现虚假告警「坏行 0」：' + cleanText)
+  assert.ok(!cleanText.includes('坏行'), 'badLines=0 不应渲染坏行提示')
+
+  const badCards = SYData.normalizeCards(Object.assign({}, FIX_CARDS, {
+    source: Object.assign({}, FIX_CARDS.source, { badLines: 2 }),
+    meta: Object.assign({}, FIX_CARDS.meta, { playbook: 'pricing_response' }),
+    solve: {
+      route: 'SupportEnumeration',
+      completeness: 'Complete',
+      equilibria: [{ id: 'e1', kind: 'Mixed', payoffs: ['3', '3'], support: [[0, 1], [0, 1]] }]
+    }
+  }))
+
+  const badVm = vmOf(Object.assign({}, vmData, { cards: { phase: 'ok', data: badCards, error: null }, tab: 'overview' }))
+  const ovText = textOf(SYView.overview(badVm))
+  assert.ok(ovText.includes('坏行 2'), 'badLines=2 应如实提示「坏行 2」：' + ovText)
+
+  const headText = textOf(SYView.caseHead(badCards))
+  assert.ok(headText.includes('调价 / 促销响应'), 'pricing_response 应译为中文：' + headText)
+  assert.ok(!headText.includes('pricing_response'), '不应露出原始英文 playbook：' + headText)
+
+  const solveText = textOf(SYView.equilibrium(badVm))
+  assert.ok(solveText.includes('支持枚举（精确）'), 'SupportEnumeration 应译为中文：' + solveText)
+  assert.ok(solveText.includes('完备'), 'Complete 应译为中文：' + solveText)
+  assert.ok(solveText.includes('混合策略'), 'Mixed 应译为中文：' + solveText)
+  assert.ok(!solveText.includes('SupportEnumeration') && !solveText.includes('Complete') && !solveText.includes('Mixed'))
+
+  const partialLabel = SYData.completenessLabel('Partial { unsupported: 1, underdetermined: 2, ghost: 0 }')
+  assert.ok(partialLabel.includes('部分完备') && partialLabel.includes('超范围 1'), partialLabel)
+})
+
 // ── 汇总 ────────────────────────────────────────────────────
 console.log('')
 if (failures) {
   console.log('✗ ' + failures + ' 项失败')
   process.exit(1)
 }
-console.log('✓ 全部通过（' + (registrations.length + 1) + ' 组注册 / 28 项断言）')
+console.log('✓ 全部通过（' + (registrations.length + 1) + ' 组注册 / 31 项断言）')

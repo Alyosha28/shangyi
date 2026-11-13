@@ -185,7 +185,7 @@ fn real_binary_handshake_lists_tools_and_serves_a_call() {
     let tools = listed["result"]["tools"].as_array().expect("tools 数组");
     let registry = shangyi_tools::ToolRegistry::standard();
     assert_eq!(tools.len(), registry.len(), "tools/list 数量必须等于注册表");
-    assert_eq!(registry.len(), 38, "注册表工具数变了：同步本断言");
+    assert_eq!(registry.len(), 39, "注册表工具数变了：同步本断言");
     let listed_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     let expected: Vec<&str> = registry.names().into_iter().collect();
     assert_eq!(listed_names, expected);
@@ -425,4 +425,80 @@ fn external_cli_checkpoint_approval_advances_live_mcp_serve_process() {
         status_text.contains("阶段=model_build"),
         "外部确认后 mcp-serve 应已自动推进至 model_build：{status_text}"
     );
+}
+
+#[test]
+fn followup_task_lifecycle_works_end_to_end_in_mcp_serve() {
+    let home_dir = temp_home("e2e-followup");
+    let home = home_str(&home_dir);
+    let mut child = McpChild::spawn(&["mcp-serve", "--home", home.as_str()]);
+
+    let _ = child.request(
+        json!(1),
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": {}}),
+    );
+    let s1 = child.call_tool(
+        json!(2),
+        "select_task_scope",
+        json!({"scope": "cost", "reason": "首轮先做场地租金成本试算"}),
+    );
+    assert_eq!(s1["isError"], json!(false), "首轮选范围应成功：{s1}");
+
+    let cost = child.call_tool(
+        json!(3),
+        "business_cost",
+        json!({
+            "operation": "create",
+            "scenario": "新店月租",
+            "currency": "CNY",
+            "costs_complete": false,
+            "costs": [{
+                "scenario": "新店月租",
+                "name": "租金",
+                "treatment": "cash_expense",
+                "amount": null,
+                "period": "month",
+                "basis": "user_provided",
+                "source": "房东报价未取得"
+            }]
+        }),
+    );
+    assert_eq!(cost["isError"], json!(false), "business_cost 应成功：{cost}");
+
+    let done = child.call_tool(
+        json!(4),
+        "complete_task",
+        json!({
+            "summary": "已登记新店月租待确认报价。",
+            "missing": ["房东正式租金报价"]
+        }),
+    );
+    assert_eq!(done["isError"], json!(false), "complete_task 应成功：{done}");
+
+    let blocked = child.call_tool(
+        json!(5),
+        "select_task_scope",
+        json!({"scope": "research", "reason": "用户追问竞对动态"}),
+    );
+    assert_eq!(blocked["isError"], json!(true), "交付后未经 begin_followup_task 不得直接重选范围");
+    let blocked_text = blocked["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        blocked_text.contains("begin_followup_task"),
+        "应提示调用 begin_followup_task：{blocked_text}"
+    );
+
+    let reopen = child.call_tool(
+        json!(6),
+        "begin_followup_task",
+        json!({"reason": "用户追问竞对公开动态"}),
+    );
+    assert_eq!(reopen["isError"], json!(false), "begin_followup_task 应成功：{reopen}");
+
+    let s2 = child.call_tool(
+        json!(7),
+        "select_task_scope",
+        json!({"scope": "research", "reason": "用户追问竞对公开动态"}),
+    );
+    assert_eq!(s2["isError"], json!(false), "重开后重新选定 research 范围应成功：{s2}");
 }

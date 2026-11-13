@@ -64,7 +64,8 @@
         - 多方博弈咨询：scope="consultation"，按需设 mode（scenario / whatif /
           discover；whatif 须传 action）与 playbook（pricing_response /
           market_entry / negotiation / competitor_intel），严格按阶段闸门推进。
-        - 已结案短任务若用户继续追问，先调用 reopen_task。
+        - 已结案短任务（或条件分析交付）若用户继续追问，先调用 begin_followup_task
+          重开新一轮范围选择，再调用 select_task_scope。
 
       工具与资源纪律：决策依据只来自商奕领域工具（mcp__shangyi__*，如
       select_task_scope、vn_map、pars_check、web_search、poi_survey、

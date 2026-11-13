@@ -283,17 +283,16 @@ const TERMINAL_PHASE = 'archived'
  *
  *   1) phase     = 最后一个 `phase_entered.to`。旧案例没有该事件 → null。
  *   2) done      = phase === 'archived'（阶段机不变的终态，见上方常量）。
- *   3) stuck     = 两条可核证据之一：
- *                  a. 有 `checkpoint_opened` 在最后一次同 id 的 `checkpoint_answered` 之后
- *                     —— 闸门在等用户答复，流程无法自行推进；
- *                  b. 最后一个 `tool_call_finished.outcome.status === 'failed'`
- *                     —— 硬失败收尾。注意 `blocked` 是引擎的正当拒绝（如 MCP 侧 web_search
- *                     未接线），不算失败，不计入 stuck。
- *   4) running   = 最后一次 `turn_started` 没有对应的 `turn_ended`（轮次未收尾）。
+ *   3) waiting   = 有 `checkpoint_opened` 在最后一次同 id 的 `checkpoint_answered` 之后
+ *                  —— 正常关口等待用户确认，并未出错或阻塞；
+ *   4) stuck     = 最后一个 `tool_call_finished.outcome.status === 'failed'`
+ *                  —— 硬失败收尾。注意 `blocked` 是引擎的正当拒绝（如 MCP 侧 web_search
+ *                  未接线），不算失败，不计入 stuck。
+ *   5) running   = 最后一次 `turn_started` 没有对应的 `turn_ended`（轮次未收尾）。
  *                  口径说明：日志看不出「进程还在跑」还是「进程被杀」，两者都表现为
  *                  未收尾轮次；因此该值应读作「未收尾」，不是「正在运行」。UI 需区分时可读
  *                  openTurn / lastEvent 两个辅助字段。
- *   5) null      = 以上都不成立（例如空日志、或无阶段事件且无失败）。
+ *   6) null      = 以上都不成立（例如空日志、或无阶段事件且无失败）。
  *
  * 辅助字段（新增，供 UI 显示更细的状态，不参与 status 判定）：
  *   pendingCheckpoint  未结算的 checkpoint id
@@ -339,7 +338,7 @@ export function inferProgress(events) {
 
   let status = null
   if (phase === TERMINAL_PHASE) status = 'done'
-  else if (pendingCheckpoint) status = 'stuck'
+  else if (pendingCheckpoint) status = 'waiting'
   else if (lastToolFailed) status = 'stuck'
   else if (openTurn) status = 'running'
 

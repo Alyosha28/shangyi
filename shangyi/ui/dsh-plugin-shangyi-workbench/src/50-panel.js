@@ -222,7 +222,7 @@
           openConversation: function () {
             try {
               if (ctx && ctx.layout && typeof ctx.layout.selectPanel === "function") {
-                ctx.layout.selectPanel(null); // null = 回到对话面板
+                ctx.layout.selectPanel("conversation"); // WORKBENCH-CONTRACT: main 对话面板 key
               }
             } catch (e) {
               // 布局服务不可用时不阻断：用户仍可用侧栏「新会话」切回。

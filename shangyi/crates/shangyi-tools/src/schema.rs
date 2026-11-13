@@ -98,6 +98,18 @@ pub fn tool_schema(name: &str) -> Option<serde_json::Value> {
             "description":"仅交付已经选择的资料/费用短任务。summary 是直接给用户的最终普通中文答复，包含实际结果、来源、时效和假设；missing 是仍未取得或未完成事项，不能为了完成而填0。引擎要求本任务已有真实检索尝试/费用结果，并将未知金额、不完整成本和抓取缺口标成partial。该工具不构建博弈、不确认假设、不宣称完整咨询已归档。",
             "properties":{"summary":{"type":"string","minLength":1,"description":"直接展示给用户的最终可读Markdown，必须遵守用户指定的格式：要求表格就提供Markdown表格。段落、列表和表格行使用真正换行字符，由JSON序列化自然转义，不要先把换行写成文字形式再重复转义。保留事实、数值、来源、未知与假设；用户原话或代码中的字面量保持原样。"},"missing":{"type":"array","items":{"type":"string","minLength":1}}}
         }),
+        "begin_followup_task" => json!({
+            "type": "object",
+            "additionalProperties": false,
+            "description": "在 `complete_task` 或 `conditional_analysis` 已完成交付后，若用户在对话中继续追问或追加新需求，调用本工具重开新一轮范围选择（保留既有证据与对话记录，清除前序任务完成锁定；之后须重新调用 `select_task_scope`）。",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "可选：简述用户继续追问或追加分析的新需求。"
+                }
+            }
+        }),
         "research_task_plan" => json!({
             "type":"object","additionalProperties":false,"required":["fields"],
             "description":"research或research_and_cost先登记本任务用户实际请求的字段，再检索。字段标签与request_quote直接摘自用户原文；对象subject也须来自用户原文。不要把用户未问的承办、指导、门牌或额外日期类型加入清单。同任务不能删字段来伪装完成。用户要求多个活动时用minimum_findings声明最少项数。",
@@ -822,22 +834,30 @@ pub fn tool_schema(name: &str) -> Option<serde_json::Value> {
             }
         }),
 
-        // ── 回退提议 ──
+        // ── 回退提议与裁决结算 ──
         "request_rewind" => json!({
             "type": "object",
-            "description": "当你判断**当前阶段的结论不可靠、须回到更早阶段补材料**时调用。\
-                            这只是**提议**——是否回退由用户决定，工具会返回用户的选择。\
-                            不要在还有别的办法时用它（例如先用 web_search 补来源）。",
-            "required": ["target", "reason"],
+            "description": "模型判断当前结论不可靠、须回到更早阶段补材料时调用。分两步完成（铁律 2）：\
+                            ① 首次提议回退时传 `target` 与 `reason`（服务端只挂起提议，不回退；须转达用户等待确认）；\
+                            ② 收到真实用户在对话中的明确同意或拒绝后，再次调用本工具传 `decision`（approve/reject）与逐字摘自该条回复的 `user_quote`（引擎强校验可信用户账本，严禁模型自行同意回退）。",
             "additionalProperties": false,
             "properties": {
                 "target": {
                     "enum": ["intake", "intel", "model_build", "solve", "select", "consequence", "discover"],
-                    "description": "建议退回到哪个阶段"
+                    "description": "提议回退时必填：建议退回到哪个阶段；结算时可选用于核对。"
                 },
                 "reason": {
                     "type": "string",
-                    "description": "为什么要回退、补什么材料——这会被展示给用户作为决策依据"
+                    "description": "提议回退时必填：为什么要回退、补什么材料——这会被展示给用户作为决策依据"
+                },
+                "decision": {
+                    "enum": ["approve", "reject"],
+                    "description": "仅在回退提议已发出且收到真实用户明确裁决后传入：approve=用户同意回退（作废下游产物），reject=用户拒绝回退（留在当前阶段）。"
+                },
+                "user_quote": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "传入 decision 时必填：逐字引用发出回退提议之后真实用户在对话中的同意/拒绝原话（引擎在可信用户账本中核验 actor=user，未命中则拒绝回退）。"
                 }
             }
         }),
@@ -907,6 +927,7 @@ mod tests {
     fn all_wired_tools_have_schemas() {
         // 与 `domain_exec::wiring_status` 的已接线集对应
         let wired = [
+            "select_task_scope", "complete_task", "begin_followup_task",
             "vn_map", "pars_check", "ask_user", "web_search", "web_fetch",
             "participant_profile_update", "gamespec_build", "gamespec_validate",
             "solve_equilibria", "select_equilibria", "select_fuse", "kb_retrieve",

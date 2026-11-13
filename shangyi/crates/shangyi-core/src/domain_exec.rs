@@ -5817,6 +5817,69 @@ impl<'a> DomainExecutor<'a> {
         }
         Ok(ids)
     }
+    fn request_followup_task(&self, args: &serde_json::Value) -> ExecOutcome {
+        let Some(obj) = args.as_object() else {
+            return ExecOutcome::Failed("begin_followup_task 参数必须是 JSON 对象".into());
+        };
+        if let Some(bad_key) = obj.keys().find(|k| k.as_str() != "reason") {
+            return ExecOutcome::Failed(format!(
+                "begin_followup_task 不支持未知字段 `{bad_key}`（仅接受可选 `reason`）"
+            ));
+        }
+        let reason = match obj.get("reason") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) => {
+                let t = s.trim();
+                if t.is_empty() {
+                    return ExecOutcome::Failed("`begin_followup_task.reason` 若传入则必须是非空字符串".into());
+                }
+                Some(t.to_string())
+            }
+            Some(_) => {
+                return ExecOutcome::Failed("`begin_followup_task.reason` 必须是字符串".into());
+            }
+        };
+        if self.state.task_scope.is_none() {
+            return ExecOutcome::Failed("当前任务尚未交付或未选择范围，不能重置新一轮任务范围".into());
+        }
+        ExecOutcome::FollowupTaskRequested { reason }
+    }
+
+    pub fn clear_artifact_keys(&mut self, keys: &[String]) {
+        for key in keys {
+            match key.as_str() {
+                "participant_profiles" => self.state.profiles.clear(),
+                "gamespec" => {
+                    self.state.game_spec = None;
+                    self.state.game_spec_evidence = None;
+                }
+                "equilibrium_set" => self.state.equilibria_json = None,
+                "equilibrium_distribution" => {
+                    self.state.distribution = None;
+                    self.state.selector_scores.clear();
+                }
+                "consequence_report" => self.state.consequence_report = None,
+                "discovery_report" => self.state.discovery_report = None,
+                "recommendation" => self.state.recommendation = None,
+                "report_model" => {
+                    self.state.report_json = None;
+                    self.state.report_model = None;
+                }
+                "case_archived" => self.state.case_library = shangyi_kb::CaseLibrary::new(),
+                _ => {}
+            }
+        }
+    }
+
+    pub fn seed_followup_request_text(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            if !self.state.task_request_text.is_empty() {
+                self.state.task_request_text.push('\n');
+            }
+            self.state.task_request_text.push_str(trimmed);
+        }
+    }
 }
 
 impl ToolExecutor for DomainExecutor<'_> {
@@ -5839,6 +5902,7 @@ impl ToolExecutor for DomainExecutor<'_> {
         }
         let outcome = match call.name.as_str() {
             "select_task_scope" => self.select_task_scope(&call.arguments, phase),
+            "begin_followup_task" => self.request_followup_task(&call.arguments),
             "research_task_plan" => self.research_task_plan(&call.arguments),
             "research_task_update" => self.research_task_update(&call.arguments),
             "research_document_lookup" => self.research_document_lookup(call, phase),
@@ -6314,6 +6378,7 @@ pub fn wiring_status() -> BTreeMap<&'static str, &'static str> {
     use std::collections::BTreeMap;
     BTreeMap::from([
         ("select_task_scope", "wired"),
+        ("begin_followup_task", "wired"),
         ("complete_task", "wired"),
         ("research_task_plan", "wired"),
         ("research_task_update", "wired"),

@@ -47,6 +47,7 @@
     /** 状态 → 标签。没有 status 字段时返回 null（host-data 可能还没补上）。 */
     SYView.statusTag = function (status) {
       if (status === "running") return h(SYView.Tag, { tone: "warn" }, "进行中");
+      if (status === "waiting") return h(SYView.Tag, { tone: "warn" }, "待确认");
       if (status === "done") return h(SYView.Tag, { tone: "ok" }, "已完成");
       if (status === "stuck") return h(SYView.Tag, { tone: "err" }, "卡住");
       return null;
@@ -127,7 +128,7 @@
         h("h2", { className: "sy-casename", title: m.caseId || "" }, orDash(m.caseId)),
         h("div", { className: "sy-kv" },
           h("span", null, "模式 ", h("b", null, SYData.modeLabel(m.mode))),
-          h("span", null, "剧本 ", h("b", null, orDash(m.playbook))),
+          h("span", null, "剧本 ", h("b", null, orDash(SYData.playbookLabel(m.playbook)))),
           h("span", null, "范围 ", h("b", null, SYData.scopeLabel(m.scope))),
           h("span", null, "创建 ", h("b", null, SYData.fmtTime(m.createdAt))),
           h("span", null, "日志 ", h("b", null, SYData.fmtTime(cards.source.mtime)))));
@@ -155,7 +156,11 @@
       var cp = cards && cards.pendingCheckpointDetail;
       var cpForm = vm.cpForm || { note: "", phase: "idle", message: null, error: null };
       var notice = cpForm.phase === "done" && cpForm.message
-        ? h("div", { className: "sy-status", role: "status" }, cpForm.message)
+        ? h("div", { className: "sy-status", role: "status" },
+            h("span", { style: { flex: "1 1 auto" } }, cpForm.message),
+            vm.actions && vm.actions.openConversation
+              ? h("button", { type: "button", className: "sy-btn is-primary", onClick: vm.actions.openConversation }, "回到对话面板")
+              : null)
         : null;
       if (!cp) return notice;
 
@@ -244,7 +249,7 @@
           h("div", { className: "sy-note" },
             "本页全部数字来自商奕案例日志（case.jsonl）的只读投影：前端只展示，不重算、不估算。日志行数 ",
             SYData.fmtNum(m.events),
-            m.badLines === null ? "" : "，坏行 " + SYData.fmtNum(cards.source.badLines),
+            cards.source && cards.source.badLines > 0 ? "，坏行 " + SYData.fmtNum(cards.source.badLines) : "",
             "。")));
     };
 
@@ -350,7 +355,7 @@
         return h("div", { className: "sy-eq", key: eq.id || i },
           h("div", { className: "sy-eq-top" },
             h("span", { className: "sy-eq-id" }, orDash(eq.id)),
-            eq.kind ? h("span", { className: "sy-eq-kind" }, eq.kind) : null,
+            eq.kind ? h("span", { className: "sy-eq-kind" }, SYData.eqKindLabel(eq.kind)) : null,
             Array.isArray(eq.payoffs) ? h("span", { className: "sy-eq-pay" }, "支付 [" + eq.payoffs.join(", ") + "]") : null,
             pct === null ? null : h("span", { className: "sy-eq-prob" }, pct + "%")),
           pct === null ? null : h("div", { className: "sy-bar", "aria-hidden": true }, h("i", { style: { width: pct + "%" } })));
@@ -358,8 +363,8 @@
       return h("div", null,
         h("div", { className: "sy-sec-h", style: { marginTop: "8px" } },
           "均衡与选择",
-          solve.route ? h("span", { className: "sy-tag is-mute" }, "路线 " + solve.route) : null,
-          solve.completeness ? h("span", { className: "sy-tag is-mute" }, "完整度 " + solve.completeness) : null,
+          solve.route ? h("span", { className: "sy-tag is-mute" }, "路线 " + SYData.solveRouteLabel(solve.route)) : null,
+          solve.completeness ? h("span", { className: "sy-tag is-mute" }, "完整度 " + SYData.completenessLabel(solve.completeness)) : null,
           h("span", { className: "sy-tag is-mute" }, solve.equilibria.length + " 个均衡")),
         rows,
         h("div", { className: "sy-sec" },

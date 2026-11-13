@@ -735,6 +735,60 @@ window.__ModuleLoader__.load({
       cost: "费用测算"
     };
 
+    SYData.PLAYBOOK_LABELS = {
+      pricing_response: "调价 / 促销响应",
+      market_entry: "市场进入",
+      negotiation: "谈判对策",
+      competitor_intel: "竞对情报"
+    };
+
+    SYData.EQ_KIND_LABELS = {
+      Pure: "纯策略",
+      pure: "纯策略",
+      Mixed: "混合策略",
+      mixed: "混合策略"
+    };
+
+    SYData.SOLVE_ROUTE_LABELS = {
+      SupportEnumeration: "支持枚举（精确）",
+      LemkeHowson: "Lemke–Howson（交叉检查）",
+      Analytic: "解析求根"
+    };
+
+    SYData.COMPLETENESS_LABELS = {
+      Complete: "完备",
+      Partial: "不完备",
+      NotGuaranteed: "不保证完备"
+    };
+
+    SYData.playbookLabel = function (v) {
+      return v ? (SYData.PLAYBOOK_LABELS[v] || v) : v;
+    };
+
+    SYData.eqKindLabel = function (v) {
+      return v ? (SYData.EQ_KIND_LABELS[v] || v) : v;
+    };
+
+    SYData.solveRouteLabel = function (v) {
+      return v ? (SYData.SOLVE_ROUTE_LABELS[v] || v) : v;
+    };
+
+    SYData.completenessLabel = function (v) {
+      if (!v) return v;
+      if (SYData.COMPLETENESS_LABELS[v]) return SYData.COMPLETENESS_LABELS[v];
+      var s = String(v);
+      if (s.indexOf("Partial") === 0) {
+        var m = s.match(/unsupported:\s*(\d+),\s*underdetermined:\s*(\d+),\s*ghost:\s*(\d+)/);
+        if (m) return "部分完备（超范围 " + m[1] + " · 欠定 " + m[2] + " · 幽灵 " + m[3] + "）";
+        return "部分完备";
+      }
+      if (s.indexOf("NotGuaranteed") === 0) {
+        var am = s.match(/algorithm:\s*"([^"]+)"/);
+        return am ? "不保证完备（" + am[1] + "）" : "不保证完备";
+      }
+      return s;
+    };
+
     SYData.SCOPE_LABELS = {
       consultation: "完整博弈咨询",
       research: "调研快答",
@@ -1192,6 +1246,7 @@ window.__ModuleLoader__.load({
     /** 状态 → 标签。没有 status 字段时返回 null（host-data 可能还没补上）。 */
     SYView.statusTag = function (status) {
       if (status === "running") return h(SYView.Tag, { tone: "warn" }, "进行中");
+      if (status === "waiting") return h(SYView.Tag, { tone: "warn" }, "待确认");
       if (status === "done") return h(SYView.Tag, { tone: "ok" }, "已完成");
       if (status === "stuck") return h(SYView.Tag, { tone: "err" }, "卡住");
       return null;
@@ -1272,7 +1327,7 @@ window.__ModuleLoader__.load({
         h("h2", { className: "sy-casename", title: m.caseId || "" }, orDash(m.caseId)),
         h("div", { className: "sy-kv" },
           h("span", null, "模式 ", h("b", null, SYData.modeLabel(m.mode))),
-          h("span", null, "剧本 ", h("b", null, orDash(m.playbook))),
+          h("span", null, "剧本 ", h("b", null, orDash(SYData.playbookLabel(m.playbook)))),
           h("span", null, "范围 ", h("b", null, SYData.scopeLabel(m.scope))),
           h("span", null, "创建 ", h("b", null, SYData.fmtTime(m.createdAt))),
           h("span", null, "日志 ", h("b", null, SYData.fmtTime(cards.source.mtime)))));
@@ -1300,7 +1355,11 @@ window.__ModuleLoader__.load({
       var cp = cards && cards.pendingCheckpointDetail;
       var cpForm = vm.cpForm || { note: "", phase: "idle", message: null, error: null };
       var notice = cpForm.phase === "done" && cpForm.message
-        ? h("div", { className: "sy-status", role: "status" }, cpForm.message)
+        ? h("div", { className: "sy-status", role: "status" },
+            h("span", { style: { flex: "1 1 auto" } }, cpForm.message),
+            vm.actions && vm.actions.openConversation
+              ? h("button", { type: "button", className: "sy-btn is-primary", onClick: vm.actions.openConversation }, "回到对话面板")
+              : null)
         : null;
       if (!cp) return notice;
 
@@ -1389,7 +1448,7 @@ window.__ModuleLoader__.load({
           h("div", { className: "sy-note" },
             "本页全部数字来自商奕案例日志（case.jsonl）的只读投影：前端只展示，不重算、不估算。日志行数 ",
             SYData.fmtNum(m.events),
-            m.badLines === null ? "" : "，坏行 " + SYData.fmtNum(cards.source.badLines),
+            cards.source && cards.source.badLines > 0 ? "，坏行 " + SYData.fmtNum(cards.source.badLines) : "",
             "。")));
     };
 
@@ -1495,7 +1554,7 @@ window.__ModuleLoader__.load({
         return h("div", { className: "sy-eq", key: eq.id || i },
           h("div", { className: "sy-eq-top" },
             h("span", { className: "sy-eq-id" }, orDash(eq.id)),
-            eq.kind ? h("span", { className: "sy-eq-kind" }, eq.kind) : null,
+            eq.kind ? h("span", { className: "sy-eq-kind" }, SYData.eqKindLabel(eq.kind)) : null,
             Array.isArray(eq.payoffs) ? h("span", { className: "sy-eq-pay" }, "支付 [" + eq.payoffs.join(", ") + "]") : null,
             pct === null ? null : h("span", { className: "sy-eq-prob" }, pct + "%")),
           pct === null ? null : h("div", { className: "sy-bar", "aria-hidden": true }, h("i", { style: { width: pct + "%" } })));
@@ -1503,8 +1562,8 @@ window.__ModuleLoader__.load({
       return h("div", null,
         h("div", { className: "sy-sec-h", style: { marginTop: "8px" } },
           "均衡与选择",
-          solve.route ? h("span", { className: "sy-tag is-mute" }, "路线 " + solve.route) : null,
-          solve.completeness ? h("span", { className: "sy-tag is-mute" }, "完整度 " + solve.completeness) : null,
+          solve.route ? h("span", { className: "sy-tag is-mute" }, "路线 " + SYData.solveRouteLabel(solve.route)) : null,
+          solve.completeness ? h("span", { className: "sy-tag is-mute" }, "完整度 " + SYData.completenessLabel(solve.completeness)) : null,
           h("span", { className: "sy-tag is-mute" }, solve.equilibria.length + " 个均衡")),
         rows,
         h("div", { className: "sy-sec" },
@@ -1985,7 +2044,7 @@ window.__ModuleLoader__.load({
           openConversation: function () {
             try {
               if (ctx && ctx.layout && typeof ctx.layout.selectPanel === "function") {
-                ctx.layout.selectPanel(null); // null = 回到对话面板
+                ctx.layout.selectPanel("conversation"); // WORKBENCH-CONTRACT: main 对话面板 key
               }
             } catch (e) {
               // 布局服务不可用时不阻断：用户仍可用侧栏「新会话」切回。

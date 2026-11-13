@@ -52,14 +52,15 @@ shangyi/ui/
   "events": 42,
   "hasMatrix": true, "hasSolve": true, "hasSelection": false,
   "phase": "solve",            // 最后一个 phase_entered.to
-  "status": "running|done|stuck|null",  // 判据见下
+  "status": "running|waiting|done|stuck|null",  // 判据见下
   "pendingCheckpoint": "cp2|null", "openTurn": true, "lastEvent": "…", "lastToolOk": true
 } ] }
 ```
 
 **判据口径（来源：host-data 实现，已与 `shangyi-core/src/phase_graph.rs` 对拍）**
 - `done` = `phase === 'archived'`（`assert_well_formed()` 要求每条剧本路径终止于 archived）
-- `stuck` = ① 有 `checkpoint_opened` 晚于同 id 的 `checkpoint_answered`（闸门等答复）；或 ② 最后一个 `tool_call_finished.outcome.status === 'failed'`。
+- `waiting` = 有 `checkpoint_opened` 晚于同 id 的 `checkpoint_answered`（正常等待用户核准/确认关口，工作台显示琥珀色「待确认」）
+- `stuck` = 最后一个 `tool_call_finished.outcome.status === 'failed'`。
   `blocked` 是引擎正当拒绝（MCP 侧 web_search 未接线），**不算失败**
 - `running` = 最后一个 `turn_started` 无对应 `turn_ended`。**口径注意**：日志分不清「正在跑」与「进程被杀」，这个值只读作「未收尾」；UI 要精确展示用 `openTurn`
 - 都不成立 → `null`（不猜）

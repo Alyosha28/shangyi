@@ -40,7 +40,7 @@ fn standard_registry_has_all_documented_tools() {
     // 与 Harness §9.3 的工具表逐行对应
     let r = ToolRegistry::standard();
     let expected = [
-        "select_task_scope", "complete_task",
+        "select_task_scope", "complete_task", "begin_followup_task",
         "constraint_register", "constraint_check", "conditional_analysis",
         "research_task_plan", "research_task_update", "research_document_lookup",
         "research_record", "business_cost", "vn_map", "pars_check", "ask_user",

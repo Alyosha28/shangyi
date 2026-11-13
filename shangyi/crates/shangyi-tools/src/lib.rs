@@ -38,7 +38,7 @@ pub mod schema;
 /// Intake routing and scoped delivery are session controls, not optional domain
 /// capabilities in a playbook. Their phase restriction still applies.
 pub fn is_session_control(name: &str) -> bool {
-    matches!(name, "select_task_scope" | "complete_task" | "conditional_analysis") || is_research_control(name) || is_constraint_control(name)
+    matches!(name, "select_task_scope" | "complete_task" | "begin_followup_task" | "conditional_analysis") || is_research_control(name) || is_constraint_control(name)
 }
 pub fn is_constraint_control(name:&str)->bool {matches!(name,"constraint_register"|"constraint_check")}
 pub fn is_research_control(name: &str) -> bool {
@@ -196,6 +196,7 @@ impl ToolRegistry {
         // phases 为空 = 任意阶段
         let specs: Vec<(&str, &str, &str, TrustLevel, bool, &[&str])> = vec![
             ("select_task_scope", "按用户实际请求选择资料、费用或完整咨询范围", "shangyi-core", TrustLevel::Engine, false, &["intake"]),
+            ("begin_followup_task", "已结案短任务或条件分析交付后，按用户继续追问重开新一轮任务范围选择", "shangyi-core", TrustLevel::Engine, false, &[]),
             ("complete_task", "交付当前资料或费用任务及未取得项，不代表完整咨询归档", "shangyi-core", TrustLevel::Engine, false, &["intake"]),
             ("research_task_plan", "将用户实际请求字段与原文和证据要求关联", "shangyi-core", TrustLevel::Sidecar, true, &["intake"]),
             ("research_task_update", "登记请求字段的已读原文依据或具体缺口，不新增无关缺口", "shangyi-core", TrustLevel::Sidecar, true, &["intake"]),

@@ -198,7 +198,7 @@ fn tools_list_matches_the_registry_exactly() {
     // `shangyi-tools/src/lib.rs` 的 `let specs: Vec<...> = vec![...]` 段落里有 38 个
     // 元组，`shangyi-tools/tests/registry.rs::standard_registry_has_all_documented_tools`
     // 的 expected 列表也是 38 项。故这里的判据是"与注册表一致"，不是照抄 41。
-    assert_eq!(registry.len(), 38, "注册表工具数变了：请同步本断言与文档");
+    assert_eq!(registry.len(), 39, "注册表工具数变了：请同步本断言与文档");
     assert_eq!(
         tools.len(),
         registry.len(),
@@ -272,8 +272,8 @@ fn schema_coverage_is_reported_and_never_fabricated() {
     for name in &coverage.with_schema {
         assert!(!coverage.without_schema.contains(name));
     }
-    // 实测：35 有（含被客户端子集降级的）、3 无
-    assert_eq!(coverage.with_schema.len(), 35, "有显式 schema 的工具数变了");
+    // 实测：36 有（含被客户端子集降级的）、3 无
+    assert_eq!(coverage.with_schema.len(), 36, "有显式 schema 的工具数变了");
     assert_eq!(coverage.without_schema.len(), 3, "无 schema 的工具数变了");
     assert_eq!(
         coverage.without_schema,
@@ -918,4 +918,409 @@ fn conversational_checkpoint_rejects_forgery_and_settles_with_verified_post_chec
     .expect("resume open");
     assert_eq!(resumed_host.case_id(), case_id);
     assert_eq!(resumed_host.phase().as_str(), "model_build");
+}
+
+#[test]
+fn followup_task_reopens_scope_selection_and_survives_resume() {
+    use std::io::Write;
+
+    let home = temp_home("followup-scope");
+    let runtime_dir = home.join("runtime");
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+    let ledger = runtime_dir.join("trusted_user_inputs.jsonl");
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        &ledger,
+        format!(
+            "{{\"text\":\"先帮我算设备费（报价还没拿到）\",\"user_actor\":\"user\",\"unix_secs\":{now_secs},\"at\":\"2026-11-13T01:00:00Z\"}}\n"
+        ),
+    )
+    .expect("write ledger");
+
+    let host = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: None,
+    })
+    .expect("open");
+    let mut s = Server::new(Cursor::new(Vec::new()), Vec::new(), host);
+
+    // 1. 尚在首轮进行中，禁止误调 begin_followup_task
+    let premature = call(&mut s, json!(1), "begin_followup_task", json!({}));
+    assert!(is_error(&premature), "未完成任务前不得调用 begin_followup_task");
+
+    // 2. 完成一轮 cost 短任务
+    let sc1 = call(
+        &mut s,
+        json!(2),
+        "select_task_scope",
+        json!({"scope": "cost", "reason": "首轮先做设备成本测算"}),
+    );
+    assert!(!is_error(&sc1), "选择 cost 范围应成功：{}", text_of(&sc1));
+    let cost = call(
+        &mut s,
+        json!(3),
+        "business_cost",
+        json!({
+            "operation": "create",
+            "scenario": "设备方案",
+            "currency": "CNY",
+            "costs_complete": false,
+            "costs": [{
+                "scenario": "设备方案",
+                "name": "设备采购",
+                "treatment": "cash_expense",
+                "amount": null,
+                "period": "once",
+                "basis": "user_provided",
+                "source": "报价未取得"
+            }]
+        }),
+    );
+    assert!(!is_error(&cost), "business_cost 应成功：{}", text_of(&cost));
+    let done = call(
+        &mut s,
+        json!(4),
+        "complete_task",
+        json!({
+            "summary": "已登记设备采购待补正式报价。",
+            "missing": ["设备采购正式报价"]
+        }),
+    );
+    assert!(!is_error(&done), "complete_task 应成功：{}", text_of(&done));
+
+    // 3. 交付后直接再调 select_task_scope 必须被拒，并明确指向 begin_followup_task
+    let blocked_select = call(
+        &mut s,
+        json!(5),
+        "select_task_scope",
+        json!({"scope": "research", "reason": "追问竞对"}),
+    );
+    assert!(is_error(&blocked_select), "未先 begin_followup_task 不得重选范围");
+    assert!(
+        text_of(&blocked_select).contains("begin_followup_task"),
+        "拒绝文案应指明先调 begin_followup_task：{}",
+        text_of(&blocked_select)
+    );
+
+    // 4. 调用真实工具 begin_followup_task（无需调用不存在的 reopen_task）
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(
+        f,
+        "{{\"text\":\"再查一下瑞幸同商圈最新门店动态\",\"user_actor\":\"user\",\"at\":\"2026-11-13T01:02:00Z\"}}"
+    )
+    .unwrap();
+    drop(f);
+
+    let reopened = call(
+        &mut s,
+        json!(6),
+        "begin_followup_task",
+        json!({"reason": "用户追问同商圈竞对公开信息"}),
+    );
+    assert!(!is_error(&reopened), "begin_followup_task 应成功：{}", text_of(&reopened));
+    let reopened_json: Value = serde_json::from_str(&payload_of(&reopened)).unwrap();
+    assert_eq!(reopened_json["reopened"], json!(true));
+    assert_eq!(reopened_json["phase"], json!("intake"));
+    assert_eq!(reopened_json["evidence_preserved"], json!(true));
+
+    // 5. 重开后即可重新选择范围（例如 research）
+    let sc2 = call(
+        &mut s,
+        json!(7),
+        "select_task_scope",
+        json!({"scope": "research", "reason": "追问竞对公开动态"}),
+    );
+    assert!(!is_error(&sc2), "begin_followup_task 之后重新 select_task_scope 应成功：{}", text_of(&sc2));
+
+    let case_id = s.host().case_id().to_string();
+    drop(s);
+
+    // 6. --resume 恢复后应完整保持新开启的 research 范围，且不得误退回 scoped_result 锁定
+    let resumed_host = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home),
+        auto_approve_checkpoints: false,
+        resume_case: Some(case_id),
+    })
+    .expect("resume open");
+    let mut s2 = Server::new(Cursor::new(Vec::new()), Vec::new(), resumed_host);
+    let plan = call(
+        &mut s2,
+        json!(8),
+        "research_task_plan",
+        json!({
+            "fields": [{
+                "id": "store_news",
+                "label": "门店动态",
+                "request_quote": "瑞幸同商圈最新门店动态",
+                "evidence_required": "source_link"
+            }]
+        }),
+    );
+    assert!(!is_error(&plan), "resume 后应处于新追问的 research 范围并可登记字段：{}", text_of(&plan));
+}
+
+#[test]
+fn conversational_request_rewind_enforces_iron_law_2_across_resume() {
+    use std::io::Write;
+
+    let home = temp_home("conv-rewind");
+    let runtime_dir = home.join("runtime");
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+    let ledger = runtime_dir.join("trusted_user_inputs.jsonl");
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        &ledger,
+        format!(
+            "{{\"text\":\"对手只有一家瑞幸。我方收益为3。对手收益为2\",\"user_actor\":\"user\",\"unix_secs\":{now_secs},\"at\":\"2026-11-13T02:00:00Z\"}}\n"
+        ),
+    )
+    .expect("write ledger");
+
+    let host = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: None,
+    })
+    .expect("open");
+    let mut s = Server::new(Cursor::new(Vec::new()), Vec::new(), host);
+
+    call(&mut s, json!(1), "select_task_scope", json!({"scope": "consultation", "reason": "完整咨询"}));
+    call(&mut s, json!(2), "vn_map", json!({}));
+    call(
+        &mut s,
+        json!(3),
+        "participant_profile_update",
+        json!({
+            "participant_id": "us",
+            "value_net_role": "focal",
+            "relation_to_game": "player",
+            "common": {"interests": ["利润最大化"], "resources": ["门店选址"]}
+        }),
+    );
+    call(
+        &mut s,
+        json!(3),
+        "participant_profile_update",
+        json!({
+            "participant_id": "rival",
+            "value_net_role": "substitutor",
+            "relation_to_game": "player",
+            "common": {"interests": ["保住份额"], "resources": ["本地渠道"]}
+        }),
+    );
+    call(
+        &mut s,
+        json!(4),
+        "checkpoint",
+        json!({"items": [{"id": "i1", "content": "对手为瑞幸"}]}),
+    );
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f, "{{\"text\":\"同意竞对事实，继续\",\"user_actor\":\"user\",\"at\":\"2026-11-13T02:01:00Z\"}}").unwrap();
+    drop(f);
+    let cp1 = call(&mut s, json!(5), "checkpoint", json!({"decision": "approve", "user_quote": "同意竞对事实"}));
+    assert!(!is_error(&cp1));
+    assert_eq!(s.host().phase().as_str(), "model_build");
+
+    let verified_spec = json!({
+        "game_id": "mcp-rewind-probe",
+        "players": [
+            {"id": "us", "name": "我方", "vn_role": "focal", "relation_to_game": "player"},
+            {"id": "rival", "name": "对手", "vn_role": "substitutor", "relation_to_game": "player"}
+        ],
+        "strategies": {"us": ["维持", "降价"], "rival": ["维持", "降价"]},
+        "payoffs": {"form": "normal", "values": {"cells": {
+            "维持,维持": {"us": {"kind": "ref", "value": "p_us"}, "rival": {"kind": "ref", "value": "p_rival"}},
+            "维持,降价": {"us": {"kind": "ref", "value": "p_us"}, "rival": {"kind": "ref", "value": "p_rival"}},
+            "降价,维持": {"us": {"kind": "ref", "value": "p_us"}, "rival": {"kind": "ref", "value": "p_rival"}},
+            "降价,降价": {"us": {"kind": "ref", "value": "p_us"}, "rival": {"kind": "ref", "value": "p_rival"}}
+        }}},
+        "params": {
+            "p_us": {"name": "p_us", "value": 3, "source": {"kind": "user_confirmed", "checkpoint": "cp2", "user_quote": "我方收益为3"}},
+            "p_rival": {"name": "p_rival", "value": 2, "source": {"kind": "user_confirmed", "checkpoint": "cp2", "user_quote": "对手收益为2"}}
+        }
+    });
+    let gs = call(&mut s, json!(6), "gamespec_build", verified_spec);
+    assert!(!is_error(&gs), "gamespec_build 应成功：{}", text_of(&gs));
+    assert!(!text_of(&gs).contains("insufficient_evidence"), "gamespec_build 不应报证据不足：{}", text_of(&gs));
+    let open_cp2 = call(
+        &mut s,
+        json!(7),
+        "checkpoint",
+        json!({"items": [{"id": "p1", "content": "p_us = 3, p_rival = 2", "source": "用户明确说明收益", "proposed_value": "3 / 2"}]}),
+    );
+    assert!(!is_error(&open_cp2), "open cp2 应成功：{}", text_of(&open_cp2));
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f, "{{\"text\":\"同意建模假设，开始求解\",\"user_actor\":\"user\",\"at\":\"2026-11-13T02:02:00Z\"}}").unwrap();
+    drop(f);
+    let cp2 = call(&mut s, json!(8), "checkpoint", json!({"decision": "approve", "user_quote": "同意建模假设"}));
+    assert!(!is_error(&cp2), "cp2 批准应成功：{}", text_of(&cp2));
+    assert_eq!(
+        s.host().phase().as_str(),
+        "solve",
+        "cp2 后应进入 solve；gs={}；open_cp2={}；cp2={}",
+        text_of(&gs),
+        text_of(&open_cp2),
+        text_of(&cp2)
+    );
+
+    // 产出 solve 阶段的均衡解集（推进到 select），以便后续检验严格下游产物 equilibrium_set 被清
+    let solved = call(&mut s, json!(9), "solve_equilibria", json!({}));
+    assert!(!is_error(&solved), "solve_equilibria 应成功：{}", text_of(&solved));
+    assert_eq!(s.host().phase().as_str(), "select");
+
+    // 阶段一：模型发起回退提议，此时不得立即回退
+    let prop1 = call(
+        &mut s,
+        json!(10),
+        "request_rewind",
+        json!({"target": "model_build", "reason": "需要修改支付矩阵结构"}),
+    );
+    assert!(!is_error(&prop1), "提议回退应成功：{}", text_of(&prop1));
+    assert_eq!(s.host().phase().as_str(), "select", "未获用户确认前不得提前回退");
+
+    // 铁律 2 门禁 1：未收到用户回退后回复，模型直接伪造 approve 必须被拒
+    let forged = call(
+        &mut s,
+        json!(11),
+        "request_rewind",
+        json!({"decision": "approve", "user_quote": "同意回退"}),
+    );
+    assert!(is_error(&forged));
+    assert_eq!(s.host().phase().as_str(), "select");
+
+    // 铁律 2 门禁 2：重放提议前的旧用户消息也必须被拒
+    let replayed = call(
+        &mut s,
+        json!(12),
+        "request_rewind",
+        json!({"decision": "approve", "user_quote": "同意建模假设"}),
+    );
+    assert!(is_error(&replayed), "重放回退提议前的旧消息必须被拒");
+    assert_eq!(s.host().phase().as_str(), "select");
+
+    // 铁律 2 门禁 3：否定/疑问句不得充当批准
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f, "{{\"text\":\"不要同意退回到建模，先继续\",\"user_actor\":\"user\",\"at\":\"2026-11-13T02:03:00Z\"}}").unwrap();
+    drop(f);
+    let negated = call(
+        &mut s,
+        json!(13),
+        "request_rewind",
+        json!({"decision": "approve", "user_quote": "同意退回到建模"}),
+    );
+    assert!(is_error(&negated), "含否定前缀的话语不得用于 approve 回退");
+    assert_eq!(s.host().phase().as_str(), "select");
+
+    // 用户拒绝回退 => 清空待决回退请求并维持当前阶段
+    let rejected = call(
+        &mut s,
+        json!(14),
+        "request_rewind",
+        json!({"decision": "reject", "user_quote": "先继续"}),
+    );
+    assert!(!is_error(&rejected), "用户拒绝回退应平稳结算：{}", text_of(&rejected));
+    assert_eq!(s.host().phase().as_str(), "select");
+
+    // 再次提出回退，并模拟用户真实同意
+    let prop2 = call(
+        &mut s,
+        json!(15),
+        "request_rewind",
+        json!({"target": "model_build", "reason": "用户确认改模型"}),
+    );
+    assert!(!is_error(&prop2));
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f, "{{\"text\":\"好的，确定退回到建模阶段改一下参数\",\"user_actor\":\"user\",\"at\":\"2026-11-13T02:04:00Z\"}}").unwrap();
+    drop(f);
+    let approved = call(
+        &mut s,
+        json!(16),
+        "request_rewind",
+        json!({"decision": "approve", "user_quote": "确定退回到建模阶段"}),
+    );
+    assert!(!is_error(&approved), "真实用户确认后回退应成功：{}", text_of(&approved));
+    assert_eq!(s.host().phase().as_str(), "model_build", "回退后应停留在目标阶段 model_build 而不得自动推进");
+    let approved_json: Value = serde_json::from_str(&payload_of(&approved)).unwrap();
+    assert!(
+        approved_json["cleared_artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "equilibrium_set"),
+        "回退到 model_build 必须清理严格下游产物 equilibrium_set：{approved_json}"
+    );
+    let blocked_solve = call(&mut s, json!(17), "solve_equilibria", json!({}));
+    assert!(is_error(&blocked_solve), "回退至 model_build 后 solve_equilibria 必须被阶段闸门拒绝");
+
+    // 进一步测试：在 model_build 提议回退至 intel 后，进程退出 --resume 再确认回退！
+    let prop3 = call(
+        &mut s,
+        json!(18),
+        "request_rewind",
+        json!({"target": "intel", "reason": "要补充一条竞对情报"}),
+    );
+    assert!(!is_error(&prop3));
+    let case_id = s.host().case_id().to_string();
+    drop(s);
+
+    let resumed_host = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: Some(case_id.clone()),
+    })
+    .expect("resume open");
+    assert_eq!(resumed_host.phase().as_str(), "model_build");
+    let mut s2 = Server::new(Cursor::new(Vec::new()), Vec::new(), resumed_host);
+
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f, "{{\"text\":\"同意退回情报阶段补充竞对\",\"user_actor\":\"user\",\"at\":\"2026-11-13T02:05:00Z\"}}").unwrap();
+    drop(f);
+    let approved_intel = call(
+        &mut s2,
+        json!(19),
+        "request_rewind",
+        json!({"decision": "approve", "user_quote": "同意退回情报阶段"}),
+    );
+    assert!(
+        !is_error(&approved_intel),
+        "跨 --resume 恢复待决回退并由用户确认应成功：{}",
+        text_of(&approved_intel)
+    );
+    assert_eq!(s2.host().phase().as_str(), "intel");
+    let intel_json: Value = serde_json::from_str(&payload_of(&approved_intel)).unwrap();
+    assert!(
+        intel_json["cleared_artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "gamespec"),
+        "回退到 intel 必须清理严格下游产物 gamespec：{intel_json}"
+    );
+    drop(s2);
+
+    // 再次 --resume 确认回退至 intel 及作废的 gamespec 在重放后保持已清理状态（不会泄漏回 executor）
+    let resumed_intel = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home),
+        auto_approve_checkpoints: false,
+        resume_case: Some(case_id),
+    })
+    .expect("resume intel");
+    assert_eq!(resumed_intel.phase().as_str(), "intel");
 }

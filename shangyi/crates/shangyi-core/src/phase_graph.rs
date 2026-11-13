@@ -700,6 +700,9 @@ impl PhaseMachine {
     pub fn scoped_result(&self) -> Option<&ScopedTaskResult> { self.scoped_result.as_ref() }
 
     pub fn allows_task_tool(&self, tool: &str) -> bool {
+        if tool == "begin_followup_task" {
+            return self.scoped_result.is_some();
+        }
         self.task_scope.map_or(matches!(tool, "select_task_scope" | "ask_user"), |scope| scope.allows_tool(tool))
     }
 
@@ -707,7 +710,10 @@ impl PhaseMachine {
         if scope==TaskScope::Conditional {
             return Err(PhaseGateError::TaskScope("conditional 是关键证据未取得时的明确交付，不是可绕过咨询的初始范围".into()));
         }
-        if self.phase != SessionPhase::Intake || self.scoped_result.is_some() {
+        if self.scoped_result.is_some() {
+            return Err(PhaseGateError::TaskScope("当前任务已交付；若用户继续追问，请先调用 `begin_followup_task` 重开新一轮范围选择，再调用 `select_task_scope`".into()));
+        }
+        if self.phase != SessionPhase::Intake {
             return Err(PhaseGateError::TaskScope("只可在新任务 intake 选择范围；不能绕过已进入的咨询阶段".into()));
         }
         self.task_scope = Some(scope);

@@ -55,7 +55,7 @@ window.__ModuleLoader__.load({
         h("table", { style: { borderCollapse: "collapse", width: "100%" } },
           h("tbody", null, rows.map(function (r, i) {
             return h("tr", { key: i },
-              h("td", { style: { color: "#9aa3b2", padding: "2px 8px 2px 0", whiteSpace: "nowrap", verticalAlign: "top" } }, r[0]),
+              h("td", { style: { color: "var(--dsw-alias-label-secondary, #555752)", padding: "2px 8px 2px 0", whiteSpace: "nowrap", verticalAlign: "top" } }, r[0]),
               h("td", { style: { padding: "2px 0", wordBreak: "break-word" } }, r[1]));
           }))));
     }
@@ -65,17 +65,17 @@ window.__ModuleLoader__.load({
       if (!mx) return h(Card, { title: "支付矩阵" }, h("div", { style: MUTED }, "本案例没有产出博弈结构（可能是研究/费用任务，或建模未完成）。"));
       var axis = mx.players.slice(0, 2);
       var head = h("tr", null, h("th", null), mx.cols.map(function (c, i) {
-        return h("th", { key: i, style: { padding: "4px 6px", color: "#9aa3b2", fontWeight: 500, fontSize: 11, verticalAlign: "bottom" } }, c);
+        return h("th", { key: i, style: { padding: "4px 6px", color: "var(--dsw-alias-label-secondary, #555752)", fontWeight: 500, fontSize: 11, verticalAlign: "bottom" } }, c);
       }));
       var body = mx.grid.map(function (row, ri) {
         return h("tr", { key: ri },
-          h("th", { style: { padding: "4px 6px", color: "#9aa3b2", fontWeight: 500, fontSize: 11, textAlign: "left" } }, row.strategy),
+          h("th", { style: { padding: "4px 6px", color: "var(--dsw-alias-label-secondary, #555752)", fontWeight: 500, fontSize: 11, textAlign: "left" } }, row.strategy),
           row.cells.map(function (cell, ci) {
             return h("td", { key: ci, style: CELL },
               cell.cells.filter(function (c) { return axis.some(function (p) { return p.name === c.player; }); })
                 .map(function (c, k) {
                   return h("div", { key: k, style: { fontSize: 11 } },
-                    h("span", { style: { color: "#8b93a3" } }, c.player + " "), c.expr);
+                    h("span", { style: { color: "var(--dsw-alias-label-tertiary, #7A7C76)" } }, c.player + " "), c.expr);
                 }));
           }));
       });
@@ -90,8 +90,8 @@ window.__ModuleLoader__.load({
     }
 
     function bar(value, color) {
-      return h("div", { style: { background: "#2a2f3a", borderRadius: 999, height: 8, overflow: "hidden" } },
-        h("div", { style: { width: Math.max(0, Math.min(100, Math.round(value * 100))) + "%", height: "100%", background: color || "linear-gradient(90deg,#4f7cff,#7aa2ff)" } }));
+      return h("div", { style: { background: "var(--dsw-alias-bg-layer-3, #E6E0D3)", borderRadius: 999, height: 8, overflow: "hidden" } },
+        h("div", { style: { width: Math.max(0, Math.min(100, Math.round(value * 100))) + "%", height: "100%", background: color || "var(--dsw-alias-brand-primary, #1F6B5C)" } }));
     }
 
     function EquilibriumCard(props) {
@@ -124,9 +124,12 @@ window.__ModuleLoader__.load({
       var label = { failed: "失败", blocked: "未取得", unknown: "结局未知" };
       return h(Card, { title: "工具失败 / 闸门拒绝", tag: h("span", { style: TAG }, "真实原文") },
         fs.slice().reverse().map(function (f, i) {
+          var isErr = f.status === "failed";
+          var toneColor = isErr ? "var(--dsw-alias-state-error-primary, #A83E30)" : "var(--dsw-alias-label-secondary, #555752)";
+          var borderColor = isErr ? "var(--dsw-alias-state-error-primary, #A83E30)" : "var(--dsw-alias-border-l2, #D3CCC0)";
           return h("div", { key: i, style: { marginBottom: 8 } },
-            h("div", { style: { color: "#f0c0c0", fontSize: 11 } }, f.tool + " · " + (label[f.status] || f.status)),
-            h("pre", { style: { margin: "3px 0 0", whiteSpace: "pre-wrap", wordBreak: "break-word", background: "#221a1a", border: "1px solid #4a2f2f", borderRadius: 8, padding: 8, color: "#f0c0c0", fontSize: 11 } },
+            h("div", { style: { color: toneColor, fontSize: 11 } }, f.tool + " · " + (label[f.status] || f.status)),
+            h("pre", { style: { margin: "3px 0 0", whiteSpace: "pre-wrap", wordBreak: "break-word", background: "var(--dsw-alias-bg-layer-2, #E9E4D8)", border: "1px solid " + borderColor, borderRadius: 8, padding: 8, color: "var(--dsw-alias-label-primary, #1D1E1C)", fontSize: 11 } },
               f.detail.length > 260 ? f.detail.slice(0, 260) + "…" : f.detail));
         }));
     }
@@ -174,7 +177,7 @@ window.__ModuleLoader__.load({
         body = h(Card, { title: "读取中" }, h("div", { style: MUTED }, "正在读取商奕案例日志（case.jsonl）…"));
       } else if (state.phase === "error") {
         body = h(Card, { title: "接口不可用" },
-          h("div", { style: { color: "#f0c0c0" } }, state.error),
+          h("div", { style: { color: "var(--dsw-alias-state-error-primary, #A83E30)" } }, state.error),
           h("div", { style: Object.assign({ marginTop: 6 }, MUTED) },
             "卡片没有退化成编造的样例：宁可不显示，也不把样例讲成真结果。"),
           h("button", { style: Object.assign({ marginTop: 8 }, BTN), onClick: function () { load("latest-cards"); } }, "重试"));

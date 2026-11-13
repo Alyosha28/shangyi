@@ -181,7 +181,8 @@
                 2) 遇到多阶段博弈或门店选址/商圈租赁任务时，可按需调用 skill 工具加载
                    shangyi-consultation-discipline 或 shangyi-store-location 技能规程，也可通过
                    read_mcp_resource 读取 shangyi://kb/* 与 shangyi://playbook/*。
-                3) 短任务结束时调用 complete_task；后续追问先调用 reopen_task。
+                3) 短任务结束时调用 complete_task；后续追问先调用 begin_followup_task，
+                   再调用 select_task_scope 重新选择范围。
                 回答使用清晰中文，先给结论，再列出引擎依据、假设来源与敏感度/不确定性边界。
           - id: time-context
             name: '@deepseek-ai/dsh-time-context'

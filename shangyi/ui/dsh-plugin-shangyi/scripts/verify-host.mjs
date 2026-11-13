@@ -121,7 +121,54 @@ try {
   assert.equal(doc.ok, true)
   assert.ok(doc.markdown.length > 50)
 
-  console.log('✓ dsh-plugin-shangyi 宿主投影、受控关口结算、可信账本与 KB 越界防护全部通过')
+  // 验证 pendingCheckpoint 状态为 'waiting'，真实 tool failed 状态为 'stuck'
+  const waitingCaseDir = path.join(dayDir, 'case-20261112-scenario-002')
+  fs.mkdirSync(waitingCaseDir, { recursive: true })
+  fs.writeFileSync(path.join(waitingCaseDir, 'header.json'), JSON.stringify({
+    case_id: 'case-20261112-scenario-002',
+    mode: 'scenario',
+    playbook_id: 'pricing_response',
+    created_at: '2026-11-12T10:05:00Z',
+    schema_version: 1
+  }))
+  fs.writeFileSync(
+    path.join(waitingCaseDir, 'case.jsonl'),
+    [
+      { seq: 1, event: { type: 'phase_entered', from: 'intake', to: 'intel', playbook: 'pricing_response', reason: 'done', at: '2026-11-12T10:05:01Z' } },
+      { seq: 2, event: { type: 'checkpoint_opened', id: 'cp1', phase: 'intel', items: ['对手促销幅度'], at: '2026-11-12T10:05:02Z' } }
+    ].map((x) => JSON.stringify(x)).join('\n') + '\n'
+  )
+
+  const stuckCaseDir = path.join(dayDir, 'case-20261112-scenario-003')
+  fs.mkdirSync(stuckCaseDir, { recursive: true })
+  fs.writeFileSync(path.join(stuckCaseDir, 'header.json'), JSON.stringify({
+    case_id: 'case-20261112-scenario-003',
+    mode: 'scenario',
+    playbook_id: 'pricing_response',
+    created_at: '2026-11-12T10:06:00Z',
+    schema_version: 1
+  }))
+  fs.writeFileSync(
+    path.join(stuckCaseDir, 'case.jsonl'),
+    [
+      { seq: 1, event: { type: 'phase_entered', from: 'intake', to: 'intel', playbook: 'pricing_response', reason: 'done', at: '2026-11-12T10:06:01Z' } },
+      { seq: 2, event: { type: 'tool_call_finished', call_id: 'c1', outcome: { status: 'failed', error: '缺少收益字段' }, at: '2026-11-12T10:06:02Z' } }
+    ].map((x) => JSON.stringify(x)).join('\n') + '\n'
+  )
+
+  const statusCases = summarizeCases(10, tmpHome)
+  const wRow = statusCases.find((c) => c.caseId === 'case-20261112-scenario-002')
+  const sRow = statusCases.find((c) => c.caseId === 'case-20261112-scenario-003')
+  assert.equal(wRow?.status, 'waiting', '待用户核准关口应为 waiting，不得误判为 stuck')
+  assert.equal(sRow?.status, 'stuck', '真实 tool failed 应为 stuck')
+
+  // 验证降级抽屉 lib/client.js 不再残余暗色硬编码颜色或蓝紫渐变条
+  const drawerSrc = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  for (const forbidden of ['#9aa3b2', '#8b93a3', '#2a2f3a', '#221a1a', '#4a2f2f', '#f0c0c0', '#4f7cff', '#7aa2ff']) {
+    assert.ok(!drawerSrc.includes(forbidden), `lib/client.js 仍残余暗色硬编码：${forbidden}`)
+  }
+
+  console.log('✓ dsh-plugin-shangyi 宿主投影、waiting/stuck 区分、受控关口结算、可信账本、降级抽屉主题令牌与 KB 越界防护全部通过')
 } finally {
   fs.rmSync(tmpHome, { recursive: true, force: true })
 }

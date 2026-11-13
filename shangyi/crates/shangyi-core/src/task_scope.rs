@@ -26,7 +26,7 @@ impl TaskScope {
         if tool == "complete_task" { return self.is_brief(); }
         if matches!(tool,"constraint_register"|"constraint_check") {return true;}
         !self.is_brief()
-            || matches!(tool, "select_task_scope" | "complete_task" | "ask_user")
+            || matches!(tool, "select_task_scope" | "complete_task" | "begin_followup_task" | "ask_user")
             // `poi_survey` 与 web_search 同类：都是**取公开事实**。站址类问题
         // （"周边有多少家同类门店"）在资料整理范围里就该能直接数出来——
         // 此前它不在这张表里，于是模型根本看不到这个工具，只能靠网页检索

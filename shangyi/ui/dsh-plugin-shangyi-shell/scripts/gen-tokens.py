@@ -175,7 +175,7 @@ SURFACE = {
     "--dsw-alias-button-floating-fill", "--dsw-alias-button-floating-hover",
     "--dsw-alias-button-ghost-active-fill", "--dsw-alias-button-ghost-active-hover",
     "--dsw-alias-button-primary-dimmed", "--dsw-alias-interactive-bg-hover-solid",
-    "--dsw-alias-turn-trigger-bg", "--dsw-alias-toast-bg", "--dsw-alias-tooltip-bg",
+    "--dsw-alias-turn-trigger-bg", "--dsw-alias-tooltip-bg",
     "--dsw-alias-scrollbar-bg-l1", "--dsw-alias-scrollbar-bg-l2",
     "--dsw-alias-scrollbar-hover-l1", "--dsw-alias-scrollbar-hover-l2",
     "--dsw-alias-onboarding-secondary-fill", "--dsw-alias-bg-skeleton",
@@ -185,12 +185,18 @@ SURFACE = {
 INK = {
     "--dsw-alias-label-primary", "--dsw-alias-label-secondary", "--dsw-alias-label-tertiary",
     "--dsw-alias-label-caption", "--dsw-alias-label-primary-dimmed", "--dsw-alias-label-primary-bluish",
-    "--dsw-alias-label-document-preview", "--dsw-alias-label-primary-inverted",
-    "--dsw-alias-label-primary-foreground", "--dsw-alias-menu-icon",
-    "--dsw-alias-button-contrast-fill", "--dsw-alias-brand-text",
-    "--dsw-alias-brand-primary-invert", "--dsw-alias-switch-thumb",
-    "--dsw-alias-label-inverted", "--dsw-alias-toast-label",
+    "--dsw-alias-label-document-preview", "--dsw-alias-menu-icon",
+    "--dsw-alias-brand-text", "--dsw-alias-brand-primary-invert",
 }
+
+# 高对比反白/前景文本与开关滑块：按所处底色自动选明暗最高对比度，不可按背景亮度进 INK 浅灰阶
+PRIMARY_FG_TOKENS = {"--dsw-alias-label-primary-foreground"}
+PRIMARY_HOVER_TOKENS = {"--dsw-alias-button-primary-hover"}
+INVERTED_FG_TOKENS = {"--dsw-alias-label-primary-inverted", "--dsw-alias-label-inverted"}
+CONTRAST_FILL_TOKENS = {"--dsw-alias-button-contrast-fill"}
+TOAST_BG_TOKENS = {"--dsw-alias-toast-bg"}
+TOAST_FG_TOKENS = {"--dsw-alias-toast-label"}
+SWITCH_THUMB_TOKENS = {"--dsw-alias-switch-thumb"}
 
 BORDER = {
     "--dsw-alias-border-l1", "--dsw-alias-border-l2", "--dsw-alias-border-l3",
@@ -240,6 +246,26 @@ SPECIAL = {
 }
 
 
+def rel_luminance(rgb):
+    def ch(v):
+        x = v / 255.0
+        return x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4
+    return 0.2126 * ch(rgb[0]) + 0.7152 * ch(rgb[1]) + 0.0722 * ch(rgb[2])
+
+
+def contrast_ratio(c1, c2):
+    l1, l2 = rel_luminance(c1), rel_luminance(c2)
+    hi, lo = max(l1, l2), min(l1, l2)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def pick_best_contrast(bg_rgb, ramp, dark):
+    """在纯白/最浅纸色与最深墨/纸底间选择对比度最高的清晰前景色。"""
+    light_cand = [255, 255, 255, 1.0] if not dark else parse(ramp["ink"][0])
+    dark_cand = parse(ramp["paper"][0]) if dark else parse(ramp["ink"][0])
+    return light_cand if contrast_ratio(bg_rgb, light_cand) >= contrast_ratio(bg_rgb, dark_cand) else dark_cand
+
+
 def transform(name, value, ramp, dark):
     """把一个默认 token 值映射到某方向、某明暗下的值。"""
     if name in KEEP:
@@ -265,6 +291,33 @@ def transform(name, value, ramp, dark):
     if not c:
         return value  # 非颜色（极少），原样保留
     a = c[3]
+    if name in PRIMARY_FG_TOKENS:
+        acc = parse(ramp["accent"])
+        return hexof(pick_best_contrast(acc, ramp, dark), a if a < 1 else None)
+    if name in PRIMARY_HOVER_TOKENS:
+        acc = parse(ramp["accent"])
+        tint = parse(ramp["ink"][0])
+        return hexof(mix(acc, tint, 0.18), a if a < 1 else None)
+    if name in CONTRAST_FILL_TOKENS:
+        fill = parse(ramp["ink"][1]) if not dark else parse(ramp["ink"][0])
+        return hexof(fill, a if a < 1 else None)
+    if name in INVERTED_FG_TOKENS:
+        # 位于对比色填充按钮（亮色深底、暗色浅底）上的反色文字
+        if dark:
+            return hexof(parse(ramp["paper"][0]), a if a < 1 else None)
+        return "#FFFFFF" if a >= 0.999 else hexof([255, 255, 255, a])
+    if name in TOAST_BG_TOKENS:
+        # 轻提示条保持沉稳深底（与 DSH 原设计一致）
+        bg = parse(ramp["ink"][1]) if not dark else parse(ramp["paper"][3])
+        return hexof(bg, a if a < 1 else None)
+    if name in TOAST_FG_TOKENS:
+        toast_bg = parse(ramp["ink"][1]) if not dark else parse(ramp["paper"][3])
+        fg = [255, 255, 255, 1.0] if not dark else parse(ramp["ink"][0])
+        if contrast_ratio(toast_bg, fg) < 7.0:
+            fg = pick_best_contrast(toast_bg, ramp, dark)
+        return hexof(fg, a if a < 1 else None)
+    if name in SWITCH_THUMB_TOKENS:
+        return "#FFFFFF" if not dark else hexof(parse(ramp["ink"][2]), a if a < 1 else None)
     if name in ACCENT_TINT:
         acc = parse(ramp["accent"])
         paper = ramp_lookup(ramp["paper"], 0.25 if dark else 0.9)
