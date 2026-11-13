@@ -45,7 +45,15 @@ const pairs = [
   ['--dsw-alias-label-primary-foreground', '--dsw-alias-button-primary-hover'],
   ['--dsw-alias-toast-label', '--dsw-alias-toast-bg'],
   ['--dsw-alias-label-primary-inverted', '--dsw-alias-button-contrast-fill'],
-  ['--dsw-alias-label-primary', '--dsw-alias-bg-base']
+  ['--dsw-alias-label-primary', '--dsw-alias-bg-base'],
+  ['--dsw-alias-brand-primary', '--dsw-alias-bg-base'],
+  ['--dsw-alias-link', '--dsw-alias-bg-base'],
+  ['--dsw-alias-state-warn-primary', '--dsw-alias-bg-base'],
+  ['--dsw-alias-state-warn-primary', '--dsw-alias-state-warn-tertiary'],
+  ['--dsw-alias-state-warn-label', '--dsw-alias-bg-base'],
+  ['--dsw-alias-state-warn-label', '--dsw-alias-state-warn-tertiary'],
+  ['--dsw-alias-state-error-primary', '--dsw-alias-bg-base'],
+  ['--dsw-alias-state-success-primary', '--dsw-alias-bg-base']
 ]
 
 let checked = 0

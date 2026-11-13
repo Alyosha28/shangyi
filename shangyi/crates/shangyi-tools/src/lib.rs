@@ -187,7 +187,7 @@ impl ToolRegistry {
         self.tools.keys().map(|s| s.as_str()).collect()
     }
 
-    /// 构建**商奕标准的 38 个领域工具**（Harness §9.3 表逐行对应；2026-11-10 实测更正：旧注释写 24）。
+    /// 构建**商奕标准的 39 个领域工具**（含 `begin_followup_task`；2026-11-10 起随范围重开入口增至 39）。
     ///
     /// 这是"默认注册表"——剧本可从中取子集（见 [`ToolRegistry::for_playbook`]）。
     pub fn standard() -> Self {

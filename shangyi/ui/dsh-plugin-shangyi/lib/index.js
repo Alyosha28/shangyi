@@ -242,7 +242,7 @@ export function projectCase(caseRef = 'latest', home = defaultHome()) {
   // 注意：phase_entered 的字段是 from/to（不是 phase）；旧案例没有该事件，phases 为空。
   const phases = events.filter((e) => e.type === 'phase_entered').map((e) => e.to).filter(Boolean)
   const checkpoints = events.filter((e) => e.type === 'checkpoint_answered').map((e) => e.id)
-  const scopeEv = [...events].reverse().find((e) => e.type === 'task_scope_selected')
+  const scope = inferScope(events)
   const tokens = events.filter((e) => e.type === 'token_usage').reduce((acc, e) => acc + (e.input_tokens || 0) + (e.output_tokens || 0), 0)
   const turns = events.filter((e) => e.type === 'turn_started').length
   const progress = inferProgress(events)
@@ -260,7 +260,7 @@ export function projectCase(caseRef = 'latest', home = defaultHome()) {
       events: events.length,
       turns,
       tokens,
-      scope: scopeEv?.scope || null,
+      scope,
       phases,
       checkpoints,
       tools: calls.length
@@ -278,16 +278,39 @@ export function projectCase(caseRef = 'latest', home = defaultHome()) {
  *  （`assert_eq!(*self.path.last().unwrap(), SessionPhase::Archived)`）。 */
 const TERMINAL_PHASE = 'archived'
 
+const PHASE_ORDER_INDEX = {
+  intake: 0,
+  intel: 1,
+  model_build: 2,
+  solve: 3,
+  select: 4,
+  consequence: 5,
+  discover: 6,
+  recommend: 7,
+  report: 8,
+  archived: 9
+}
+
+function inferScope(events) {
+  let scope = null
+  for (const e of events) {
+    if (!e || !e.type) continue
+    if (e.type === 'task_scope_selected' && e.scope) scope = e.scope
+    else if (e.type === 'scoped_task_completed' && e.result && e.result.scope) scope = e.result.scope
+    else if (e.type === 'followup_task_started') scope = null
+  }
+  return scope
+}
+
 /**
  * 从 case.jsonl 的事件序列推「最新阶段 + 状态」。三条判据都可核，判据不成立即 null：
  *
- *   1) phase     = 最后一个 `phase_entered.to`。旧案例没有该事件 → null。
+ *   1) phase     = 最后一个 `phase_entered.to` / `phase_rewound.to`（`followup_task_started` 回到 `intake`）。旧案例没有阶段事件 → null。
  *   2) done      = phase === 'archived'（阶段机不变的终态，见上方常量）。
  *   3) waiting   = 有 `checkpoint_opened` 在最后一次同 id 的 `checkpoint_answered` 之后
- *                  —— 正常关口等待用户确认，并未出错或阻塞；
- *   4) stuck     = 最后一个 `tool_call_finished.outcome.status === 'failed'`
- *                  —— 硬失败收尾。注意 `blocked` 是引擎的正当拒绝（如 MCP 侧 web_search
- *                  未接线），不算失败，不计入 stuck。
+ *                  且未因 `phase_rewound` / `followup_task_started` 撤销 —— 正常关口等待用户确认；
+ *   4) stuck     = 当前阶段/任务轮次最后一个 `tool_call_finished.outcome.status === 'failed'`
+ *                  —— 硬失败收尾（`phase_rewound` 与 `followup_task_started` 会清除历史失败残留）。
  *   5) running   = 最后一次 `turn_started` 没有对应的 `turn_ended`（轮次未收尾）。
  *                  口径说明：日志看不出「进程还在跑」还是「进程被杀」，两者都表现为
  *                  未收尾轮次；因此该值应读作「未收尾」，不是「正在运行」。UI 需区分时可读
@@ -309,7 +332,28 @@ export function inferProgress(events) {
   for (const e of events) {
     if (!e || !e.type) continue
     if (e.type === 'phase_entered' && e.to) phase = e.to
-    else if (e.type === 'checkpoint_opened' && e.id) {
+    else if (e.type === 'phase_rewound' && e.to) {
+      phase = e.to
+      lastTool = null
+      const targetIdx = PHASE_ORDER_INDEX[e.to]
+      for (let i = openOrder.length - 1; i >= 0; i--) {
+        const id = openOrder[i]
+        const cp = openMap.get(id)
+        const cpIdx = cp && cp.phase ? PHASE_ORDER_INDEX[cp.phase] : undefined
+        if (
+          typeof targetIdx === 'number' &&
+          (typeof cpIdx === 'number' ? cpIdx > targetIdx : e.to === 'intake')
+        ) {
+          openMap.delete(id)
+          openOrder.splice(i, 1)
+        }
+      }
+    } else if (e.type === 'followup_task_started') {
+      phase = 'intake'
+      lastTool = null
+      openMap.clear()
+      openOrder.length = 0
+    } else if (e.type === 'checkpoint_opened' && e.id) {
       openMap.set(e.id, {
         id: String(e.id),
         phase: e.phase || phase || null,
@@ -368,14 +412,14 @@ export function summarizeCases(limit = 30, home = defaultHome()) {
       mode = header.mode || null
       playbook = header.playbook_id || null
     } catch { /* 可选 */ }
-    const scopeEv = [...events].reverse().find((e) => e.type === 'task_scope_selected')
+    const scope = inferScope(events)
     const progress = inferProgress(events)
     out.push({
       caseId: c.caseId,
       mtime: new Date(c.mtime).toISOString(),
       mode,
       playbook,
-      scope: scopeEv?.scope || null,
+      scope,
       events: events.length,
       hasMatrix: names.has('gamespec_build'),
       hasSolve: names.has('solve_equilibria'),

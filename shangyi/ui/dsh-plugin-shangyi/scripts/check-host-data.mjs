@@ -90,22 +90,41 @@ check('kb 正文：越界 slug 全部被拒', () => {
 // ── 3. 案例摘要 + 独立对拍 ──────────────────────────────────────────────────
 // 第二套推导：只用事件顺序，不共享 inferProgress 的代码路径。
 function independentProgress(events) {
+  const ORDER = { intake: 0, intel: 1, model_build: 2, solve: 3, select: 4, consequence: 5, discover: 6, recommend: 7, report: 8, archived: 9 }
   let phase = null
-  const openIds = []
+  const openItems = []
+  let lastTool = null
   for (const e of events) {
     if (e.type === 'phase_entered' && e.to) phase = e.to
+    if (e.type === 'phase_rewound' && e.to) {
+      phase = e.to
+      lastTool = null
+      const tIdx = ORDER[e.to]
+      for (let i = openItems.length - 1; i >= 0; i--) {
+        const cIdx = openItems[i].phase ? ORDER[openItems[i].phase] : undefined
+        if (typeof tIdx === 'number' && (typeof cIdx === 'number' ? cIdx > tIdx : e.to === 'intake')) {
+          openItems.splice(i, 1)
+        }
+      }
+    }
+    if (e.type === 'followup_task_started') {
+      phase = 'intake'
+      lastTool = null
+      openItems.length = 0
+    }
     if (e.type === 'checkpoint_opened' && e.id) {
-      const i = openIds.indexOf(e.id)
-      if (i >= 0) openIds.splice(i, 1)
-      openIds.push(e.id)
+      const i = openItems.findIndex((x) => x.id === e.id)
+      if (i >= 0) openItems.splice(i, 1)
+      openItems.push({ id: e.id, phase: e.phase || phase || null })
     }
     if (e.type === 'checkpoint_answered' && e.id) {
       const first = Array.isArray(e.answers) && e.answers.length ? String(e.answers[0] || '') : ''
       if (!first.startsWith('追问：')) {
-        const i = openIds.indexOf(e.id)
-        if (i >= 0) openIds.splice(i, 1)
+        const i = openItems.findIndex((x) => x.id === e.id)
+        if (i >= 0) openItems.splice(i, 1)
       }
     }
+    if (e.type === 'tool_call_finished') lastTool = e
   }
   const last = events.length ? events[events.length - 1] : null
   let openTurn = false
@@ -113,16 +132,14 @@ function independentProgress(events) {
     if (e.type === 'turn_started') openTurn = true
     if (e.type === 'turn_ended') openTurn = false
   }
-  let lastTool = null
-  for (const e of events) if (e.type === 'tool_call_finished') lastTool = e
   const failed = Boolean(lastTool && (lastTool.outcome || {}).status === 'failed')
 
   let status = null
   if (phase === 'archived') status = 'done'
-  else if (openIds.length > 0) status = 'waiting'
+  else if (openItems.length > 0) status = 'waiting'
   else if (failed) status = 'stuck'
   else if (openTurn) status = 'running'
-  return { phase, status, pending: openIds[openIds.length - 1] || null, lastEvent: last && last.type }
+  return { phase, status, pending: openItems.length ? openItems[openItems.length - 1].id : null, lastEvent: last && last.type }
 }
 
 check('案例摘要：字段齐全 + 与独立推导逐条一致', () => {

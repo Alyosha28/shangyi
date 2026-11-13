@@ -162,13 +162,48 @@ try {
   assert.equal(wRow?.status, 'waiting', '待用户核准关口应为 waiting，不得误判为 stuck')
   assert.equal(sRow?.status, 'stuck', '真实 tool failed 应为 stuck')
 
-  // 验证降级抽屉 lib/client.js 不再残余暗色硬编码颜色或蓝紫渐变条
+  // 验证 phase_rewound 与 followup_task_started 对阶段、待决关口、失败残留与 scope 的更新
+  const rewindDir = path.join(tmpHome, 'cases', '2026-11-12', 'case-20261112-scenario-004')
+  fs.mkdirSync(rewindDir, { recursive: true })
+  fs.writeFileSync(path.join(rewindDir, 'header.json'), JSON.stringify({ case_id: 'case-20261112-scenario-004', mode: 'scenario', playbook_id: 'pricing_response' }))
+  fs.writeFileSync(path.join(rewindDir, 'case.jsonl'), [
+    JSON.stringify({ seq: 1, event: { type: 'task_scope_selected', scope: 'consultation', reason: '完整推演' } }),
+    JSON.stringify({ seq: 2, event: { type: 'phase_entered', from: 'intake', to: 'model_build', playbook: 'pricing_response', reason: 'advance' } }),
+    JSON.stringify({ seq: 3, event: { type: 'checkpoint_opened', id: 'cp2', phase: 'model_build', items: ['矩阵确认'] } }),
+    JSON.stringify({ seq: 4, event: { type: 'tool_call_finished', call_id: 'c_fail', outcome: { status: 'failed', error: 'old error' } } }),
+    JSON.stringify({ seq: 5, event: { type: 'phase_rewound', from: 'model_build', to: 'intake', due_to: '用户改假设' } })
+  ].join('\n') + '\n')
+  const rwCards = projectCase('case-20261112-scenario-004', tmpHome)
+  assert.equal(rwCards.pendingCheckpoint, null, 'phase_rewound 回到 intake 后下游 open cp2 应撤销')
+  const rwRow = summarizeCases(10, tmpHome).find((c) => c.caseId === 'case-20261112-scenario-004')
+  assert.equal(rwRow?.phase, 'intake')
+  assert.equal(rwRow?.status, null, 'phase_rewound 后旧 tool failed 不应残余为 stuck')
+
+  const followupDir = path.join(tmpHome, 'cases', '2026-11-12', 'case-20261112-scenario-005')
+  fs.mkdirSync(followupDir, { recursive: true })
+  fs.writeFileSync(path.join(followupDir, 'header.json'), JSON.stringify({ case_id: 'case-20261112-scenario-005', mode: 'research', playbook_id: 'pricing_response' }))
+  fs.writeFileSync(path.join(followupDir, 'case.jsonl'), [
+    JSON.stringify({ seq: 1, event: { type: 'task_scope_selected', scope: 'research', reason: '调研' } }),
+    JSON.stringify({ seq: 2, event: { type: 'scoped_task_completed', result: { scope: 'conditional', answer_summary: 'done', gaps: [] } } }),
+    JSON.stringify({ seq: 3, event: { type: 'tool_call_finished', call_id: 'c_fail', outcome: { status: 'failed', error: 'stale err' } } }),
+    JSON.stringify({ seq: 4, event: { type: 'followup_task_started', at: '2026-11-12T00:00:00Z' } })
+  ].join('\n') + '\n')
+  const fuCards = projectCase('case-20261112-scenario-005', tmpHome)
+  assert.equal(fuCards.meta.scope, null, 'followup_task_started 后在重新 select_task_scope 前 scope 应复位为 null')
+  const fuRow = summarizeCases(10, tmpHome).find((c) => c.caseId === 'case-20261112-scenario-005')
+  assert.equal(fuRow?.phase, 'intake')
+  assert.equal(fuRow?.status, null, 'followup_task_started 后旧失败不应残余为 stuck')
+
+  // 验证降级抽屉 lib/client.js 不再残余暗色硬编码颜色或蓝紫渐变条，且已完成中文化与 badLines 告警
   const drawerSrc = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   for (const forbidden of ['#9aa3b2', '#8b93a3', '#2a2f3a', '#221a1a', '#4a2f2f', '#f0c0c0', '#4f7cff', '#7aa2ff']) {
     assert.ok(!drawerSrc.includes(forbidden), `lib/client.js 仍残余暗色硬编码：${forbidden}`)
   }
+  for (const required of ['调价 / 促销响应', '支持枚举（精确）', 'zhCompleteness', 'badLines']) {
+    assert.ok(drawerSrc.includes(required), `lib/client.js 缺少中文化或 badLines 支持：${required}`)
+  }
 
-  console.log('✓ dsh-plugin-shangyi 宿主投影、waiting/stuck 区分、受控关口结算、可信账本、降级抽屉主题令牌与 KB 越界防护全部通过')
+  console.log('✓ dsh-plugin-shangyi 宿主投影、waiting/stuck 区分、phase_rewound/followup 状态追踪、受控关口结算、可信账本、降级抽屉主题令牌与 KB 越界防护全部通过')
 } finally {
   fs.rmSync(tmpHome, { recursive: true, force: true })
 }

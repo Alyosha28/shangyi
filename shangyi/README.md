@@ -10,7 +10,7 @@ shangyi/
 ├── crates/
 │   ├── shangyi-gamespec/              # L0 领域基座：GameSpec 数据结构与校验
 │   ├── shangyi-core/                  # L3 接线层：会话阶段机 + 工具调度 + 留档
-│   └── shangyi-mcp/                   # MCP 服务端：38 个领域工具暴露给 dsh 运行时
+│   └── shangyi-mcp/                   # MCP 服务端：39 个领域工具暴露给 dsh 运行时
 │   └── …                              # 其余 crate（solver/selection/…）
 ├── kb/                                # 知识库（35 篇 markdown：理论 20 / 方法论 12 / 概念 3，唯一真相源）
 ├── playbooks/                         # 剧本 YAML
@@ -161,7 +161,7 @@ pub enum Expr { Literal(f64), ... }   // untagged
 |---|---|---|
 | `shangyi-gamespec` | GameSpec 数据结构（参与者/价值网角色/参数带来源与分布/信息结构/动态形式/偏好）；`validate()` 把**铁律 2**（未确认假设不得进入求解）落为类型级约束 | **10 passed**（`cargo test -p shangyi-gamespec --lib`，2026-11-10 实测） |
 | `shangyi-core` | 八阶段会话状态机（设计文档 §3.1）；阶段推进**必须交付产物**（工程不变量②）；checkpoint 可回退至任意更早阶段 | **171 passed + 3 环境性失败**（`cargo test -p shangyi-core --lib`，2026-11-10 实测；3 条为 `sandbox::live_tests`，需本机允许 `sandbox-exec`，本会话外层沙箱禁止嵌套 seatbelt） |
-| `shangyi-mcp` | MCP（JSON-RPC 2.0 over stdio）服务端：`tools/list` 暴露 38 个领域工具、`tools/call` 走 `check_call` 阶段白名单 → `DomainExecutor` → 产物登记 → 阶段推进；checkpoint/ask_user 以结构化 JSON 交回调用方 | **21 passed**（`cargo test -p shangyi-mcp`）+ `shangyi mcp-serve` 真二进制 e2e 4 passed |
+| `shangyi-mcp` | MCP（JSON-RPC 2.0 over stdio）服务端：`tools/list` 暴露 39 个领域工具、`tools/call` 走 `check_call` 阶段白名单 → `DomainExecutor` → 产物登记 → 阶段推进；checkpoint/ask_user/request_rewind 以结构化 JSON 交回调用方 | **24 passed**（unit）+ **21 passed**（protocol）（`cargo test -p shangyi-mcp`）+ `shangyi mcp-serve` 真二进制 e2e 6 passed |
 
 其中 `tools/loop/check-no-harness.py` 是替代旧 `vendor_harness_is_linkable` 的**架构验证**：
 它存在即证明"内核不再依赖外部 harness 源码"这条边界能被 CI 拒绝违规，而不只是写在文档里。

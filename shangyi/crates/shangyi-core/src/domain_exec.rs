@@ -1351,6 +1351,11 @@ impl<'a> DomainExecutor<'a> {
         self.playbook = playbook;
     }
 
+    /// 恢复或同步当前任务范围到领域执行器状态（供 `--resume` 重放使用）。
+    pub fn set_task_scope(&mut self, scope: Option<TaskScope>) {
+        self.state.task_scope = scope;
+    }
+
     /// 登记一条真实用户输入到可信账本（供约束底线与收益证据校验）。
     pub fn record_trusted_user_input(&mut self, text: &str, actor: &str) {
         self.ingest_user_input(text, actor);

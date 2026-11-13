@@ -653,6 +653,25 @@ check('P0 #4: badLines === 0 时不误显「坏行 0」，> 0 时如实提示，
 
   const partialLabel = SYData.completenessLabel('Partial { unsupported: 1, underdetermined: 2, ghost: 0 }')
   assert.ok(partialLabel.includes('部分完备') && partialLabel.includes('超范围 1'), partialLabel)
+
+  assert.equal(SYData.scopeLabel('research_and_cost'), '调研与费用测算')
+  assert.equal(SYData.scopeLabel('conditional'), '条件分析（证据未齐）')
+  assert.equal(SYData.gameFormLabel('normal'), '同步博弈（策略式）')
+  assert.equal(SYData.toolStatusLabel('blocked'), '未取得')
+  assert.equal(SYData.checkpointLabel('cp2'), '关口 2 · 博弈模型与证据（cp2）')
+
+  const matText = textOf(SYView.matrix(badVm))
+  assert.ok(matText.includes('同步博弈（策略式）'), 'mx.form=normal 应译为中文：' + matText)
+
+  const calText = SYView.confidenceText({ Calibrated: { samples: 42, selectors: ['RiskDominance', 'PayoffDominance'], mean_log_loss: 0.4123 } })
+  assert.ok(calText.includes('已校准') && calText.includes('样本 42') && calText.includes('筛选器 2 个') && calText.includes('0.412'), calText)
+
+  const trailCards = SYData.normalizeCards(Object.assign({}, FIX_CARDS, {
+    meta: Object.assign({}, FIX_CARDS.meta, { checkpoints: ['cp1'] }),
+    failures: [{ tool: 'web_search', status: 'blocked', detail: '未启用' }]
+  }))
+  const trailText = textOf(SYView.trail(vmOf(Object.assign({}, vmData, { cards: { phase: 'ok', data: trailCards, error: null } }))))
+  assert.ok(trailText.includes('关口 1 · 立案边界（cp1）') && trailText.includes('未取得'), trailText)
 })
 
 // ── 汇总 ────────────────────────────────────────────────────

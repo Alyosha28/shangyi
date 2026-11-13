@@ -793,7 +793,29 @@ window.__ModuleLoader__.load({
       consultation: "完整博弈咨询",
       research: "调研快答",
       cost: "费用测算",
+      research_and_cost: "调研与费用测算",
+      conditional: "条件分析（证据未齐）",
       "task_scope:full_consult": "完整博弈咨询"
+    };
+
+    SYData.GAME_FORM_LABELS = {
+      normal: "同步博弈（策略式）",
+      Normal: "同步博弈（策略式）",
+      extensive: "序贯博弈（扩展式）",
+      Extensive: "序贯博弈（扩展式）"
+    };
+
+    SYData.TOOL_STATUS_LABELS = {
+      ok: "正常",
+      failed: "失败",
+      blocked: "未取得",
+      unknown: "结局未知"
+    };
+
+    SYData.CHECKPOINT_LABELS = {
+      cp1: "关口 1 · 立案边界（cp1）",
+      cp2: "关口 2 · 博弈模型与证据（cp2）",
+      cp3: "关口 3 · 最终建议核准（cp3）"
     };
 
     SYData.phaseLabel = function (id) {
@@ -809,6 +831,21 @@ window.__ModuleLoader__.load({
     SYData.scopeLabel = function (id) {
       if (!id) return "—";
       return SYData.SCOPE_LABELS[id] || String(id);
+    };
+
+    SYData.gameFormLabel = function (id) {
+      if (!id) return "—";
+      return SYData.GAME_FORM_LABELS[id] || String(id);
+    };
+
+    SYData.toolStatusLabel = function (id) {
+      if (!id) return "—";
+      return SYData.TOOL_STATUS_LABELS[id] || String(id);
+    };
+
+    SYData.checkpointLabel = function (id) {
+      if (!id) return "—";
+      return SYData.CHECKPOINT_LABELS[id] || String(id);
     };
 
     /** /api/shangyi/cases → 前端列表项（字段缺失一律容忍：host-data 还在补 phase/status）。 */
@@ -1505,7 +1542,7 @@ window.__ModuleLoader__.load({
         h("div", { className: "sy-sec-h", style: { marginTop: "8px" } },
           "支付矩阵",
           h("span", { className: "sy-tag", style: { marginLeft: "8px" } }, mx.game_id || "未命名博弈"),
-          mx.form ? h("span", { className: "sy-tag is-mute" }, "形式 " + mx.form) : null,
+          mx.form ? h("span", { className: "sy-tag is-mute" }, "形式：" + SYData.gameFormLabel(mx.form)) : null,
           h("span", { className: "sy-tag is-mute" }, players.length + " 名玩家"),
           h("span", { className: "sy-tag is-mute" }, (typeof mx.params === "number" ? mx.params : 0) + " 个参数")),
         h("div", { className: "sy-matrix-wrap" },
@@ -1524,6 +1561,12 @@ window.__ModuleLoader__.load({
       if (confidence.PriorUncalibrated) {
         var p = confidence.PriorUncalibrated;
         return "选择权重未校准（样本 " + orDash(p.samples) + "/" + orDash(p.needed) + "）。";
+      }
+      if (confidence.Calibrated) {
+        var c = confidence.Calibrated;
+        var nSel = Array.isArray(c.selectors) ? c.selectors.length : 0;
+        var loss = typeof c.mean_log_loss === "number" ? ("，平均对数损失 " + c.mean_log_loss.toFixed(3)) : "";
+        return "选择权重已校准（样本 " + orDash(c.samples) + "，筛选器 " + nSel + " 个" + loss + "）。";
       }
       var keys = Object.keys(confidence);
       if (!keys.length) return "选择分布已产出。";
@@ -1588,7 +1631,7 @@ window.__ModuleLoader__.load({
         items.push(h("div", { className: "sy-trail-item", key: "c" + j },
           h("div", { className: "sy-trail-when" }, "确认点 " + (j + 1)),
           h("div", { className: "sy-trail-body" },
-            h("div", { className: "sy-trail-tool" }, String(cps[j])),
+            h("div", { className: "sy-trail-tool" }, SYData.checkpointLabel(cps[j])),
             h("div", { className: "sy-trail-detail" }, "已答复（checkpoint_answered）"))));
       }
       var fails = cards.failures || [];
@@ -1598,7 +1641,7 @@ window.__ModuleLoader__.load({
           h("div", { className: "sy-trail-when" }, "失败"),
           h("div", { className: "sy-trail-body" },
             h("div", { className: "sy-trail-tool" }, orDash(f.tool)),
-            h("div", { className: "sy-trail-detail" }, orDash(f.status) + " · " + orDash(f.detail)))));
+            h("div", { className: "sy-trail-detail" }, SYData.toolStatusLabel(f.status) + " · " + orDash(f.detail)))));
       }
       return h("div", null,
         h("div", { className: "sy-sec-h", style: { marginTop: "8px" } },
@@ -1696,11 +1739,11 @@ window.__ModuleLoader__.load({
         cards.pendingCheckpoint
           ? h("div", { className: "sy-insp-row" },
             h("span", { className: "sy-k" }, "待确认"),
-            h(SYView.Tag, { tone: "warn" }, String(cards.pendingCheckpoint)))
+            h(SYView.Tag, { tone: "warn" }, SYData.checkpointLabel(cards.pendingCheckpoint)))
           : null,
         (cards.meta.checkpoints || []).length
           ? cards.meta.checkpoints.map(function (cp, i) {
-            return h("div", { className: "sy-insp-row", key: "cp" + i }, h("span", { className: "sy-v", style: { textAlign: "left" } }, String(cp)));
+            return h("div", { className: "sy-insp-row", key: "cp" + i }, h("span", { className: "sy-v", style: { textAlign: "left" } }, SYData.checkpointLabel(cp)));
           })
           : (!cards.pendingCheckpoint ? h("div", { className: "sy-note" }, "本案例没有已答复的确认点。") : null)) : null;
 

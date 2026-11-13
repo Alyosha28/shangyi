@@ -1324,3 +1324,331 @@ fn conversational_request_rewind_enforces_iron_law_2_across_resume() {
     .expect("resume intel");
     assert_eq!(resumed_intel.phase().as_str(), "intel");
 }
+
+#[test]
+fn select_task_scope_dynamic_overrides_are_atomic_on_error() {
+    let home = temp_home("atomic-intake");
+    let host = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: Some("pricing_response".to_string()),
+        home: Some(home.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: None,
+    })
+    .expect("open");
+    let mut s = Server::new(Cursor::new(Vec::new()), Vec::new(), host);
+    assert_eq!(s.host().mode(), ConsultationMode::Scenario);
+    assert_eq!(s.host().playbook().meta.id, "pricing_response");
+
+    // 1) playbook 合法，但 mode 非法：不得留下已切换的 playbook。
+    let bad_mode = call(
+        &mut s,
+        json!(1),
+        "select_task_scope",
+        json!({
+            "scope": "consultation",
+            "reason": "切换剧本后测试回滚原子性",
+            "playbook": "market_entry",
+            "mode": "not_a_mode"
+        }),
+    );
+    assert!(is_error(&bad_mode));
+    assert_eq!(s.host().playbook().meta.id, "pricing_response");
+    assert_eq!(s.host().mode(), ConsultationMode::Scenario);
+
+    // 2) playbook + mode 合法，但 scope 非法：不得切换 mode/playbook 或写 PlaybookSelected。
+    let bad_scope = call(
+        &mut s,
+        json!(2),
+        "select_task_scope",
+        json!({
+            "scope": "bogus_scope",
+            "reason": "测试无效 scope 原子回滚",
+            "playbook": "market_entry",
+            "mode": "whatif",
+            "action": "test_act"
+        }),
+    );
+    assert!(is_error(&bad_scope));
+    assert_eq!(s.host().playbook().meta.id, "pricing_response");
+    assert_eq!(s.host().mode(), ConsultationMode::Scenario);
+    assert_eq!(s.host().action(), None);
+
+    // 3) playbook + mode + action 合法但 reason 缺失：仍不得切换，随后合法调用仍按原配置走。
+    let bad_reason = call(
+        &mut s,
+        json!(3),
+        "select_task_scope",
+        json!({
+            "scope": "cost",
+            "playbook": "market_entry",
+            "mode": "discover"
+        }),
+    );
+    assert!(is_error(&bad_reason));
+    assert_eq!(s.host().playbook().meta.id, "pricing_response");
+    assert_eq!(s.host().mode(), ConsultationMode::Scenario);
+
+    let ok = call(
+        &mut s,
+        json!(4),
+        "select_task_scope",
+        json!({"scope": "cost", "reason": "仅算门店月租金"}),
+    );
+    assert!(!is_error(&ok), "{}", text_of(&ok));
+    let out: Value = serde_json::from_str(&payload_of(&ok)).unwrap();
+    assert_eq!(out["mode"], "scenario");
+    assert_eq!(out["playbook"], "pricing_response");
+}
+
+#[test]
+fn rewind_and_checkpoint_block_clause_negation_question_and_duplicate_rewind() {
+    use std::io::Write;
+
+    let home = temp_home("iron2-bypass");
+    let runtime_dir = home.join("runtime");
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+    let ledger = runtime_dir.join("trusted_user_inputs.jsonl");
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        &ledger,
+        format!(
+            "{{\"text\":\"对手只有一家瑞幸。\",\"user_actor\":\"user\",\"unix_secs\":{now_secs},\"at\":\"2026-11-13T03:00:00Z\"}}\n"
+        ),
+    )
+    .expect("write ledger");
+
+    let host = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: None,
+    })
+    .expect("open");
+    let mut s = Server::new(Cursor::new(Vec::new()), Vec::new(), host);
+
+    call(&mut s, json!(1), "select_task_scope", json!({"scope": "consultation", "reason": "完整咨询"}));
+    call(&mut s, json!(2), "vn_map", json!({}));
+    call(
+        &mut s,
+        json!(3),
+        "participant_profile_update",
+        json!({
+            "participant_id": "us",
+            "value_net_role": "focal",
+            "relation_to_game": "player",
+            "common": {"interests": ["利润"], "resources": ["资金"]}
+        }),
+    );
+    call(
+        &mut s,
+        json!(4),
+        "participant_profile_update",
+        json!({
+            "participant_id": "rival",
+            "value_net_role": "substitutor",
+            "relation_to_game": "player",
+            "common": {"interests": ["份额"], "resources": ["渠道"]}
+        }),
+    );
+    call(&mut s, json!(5), "checkpoint", json!({"items": [{"id": "i1", "content": "对手为瑞幸"}]}));
+
+    // 否定/疑问绕过企图不得通过 checkpoint 审批
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f, "{{\"text\":\"先别急着同意，能先不确认吗？\",\"user_actor\":\"user\",\"at\":\"2026-11-13T03:00:10Z\"}}").unwrap();
+    writeln!(f, "{{\"text\":\"同意方向，不过先别确认\",\"user_actor\":\"user\",\"at\":\"2026-11-13T03:00:20Z\"}}").unwrap();
+    drop(f);
+    let bypass1 = call(&mut s, json!(6), "checkpoint", json!({"decision": "approve", "user_quote": "同意"}));
+    assert!(is_error(&bypass1), "先别急着同意不得被误判为批准：{}", text_of(&bypass1));
+    let bypass2 = call(&mut s, json!(7), "checkpoint", json!({"decision": "approve", "user_quote": "同意方向"}));
+    assert!(is_error(&bypass2), "后半句「不过先别确认」反悔不得通过：{}", text_of(&bypass2));
+
+    // 合法含正面惯用语的确认应通过
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f, "{{\"text\":\"不用怀疑，同意推进\",\"user_actor\":\"user\",\"at\":\"2026-11-13T03:00:30Z\"}}").unwrap();
+    drop(f);
+    let ok_cp1 = call(&mut s, json!(8), "checkpoint", json!({"decision": "approve", "user_quote": "同意推进"}));
+    assert!(!is_error(&ok_cp1), "{}", text_of(&ok_cp1));
+    assert_eq!(s.host().phase().as_str(), "model_build");
+
+    // 提议回退后，未结算前不得再次调用 request_rewind 覆盖待决提议
+    let prop1 = call(&mut s, json!(9), "request_rewind", json!({"target": "intake", "reason": "重确认玩家"}));
+    assert!(!is_error(&prop1));
+    let dup = call(&mut s, json!(10), "request_rewind", json!({"target": "intel", "reason": "改成回退到intel"}));
+    assert!(is_error(&dup), "未结算已有 pending_rewind 时不得覆盖：{}", text_of(&dup));
+
+    // 否定/疑问句不得批准 rewind
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f, "{{\"text\":\"先不用退回\",\"user_actor\":\"user\",\"at\":\"2026-11-13T03:01:00Z\"}}").unwrap();
+    writeln!(f, "{{\"text\":\"能退回吗？\",\"user_actor\":\"user\",\"at\":\"2026-11-13T03:01:10Z\"}}").unwrap();
+    writeln!(f, "{{\"text\":\"我不同意现在回退\",\"user_actor\":\"user\",\"at\":\"2026-11-13T03:01:20Z\"}}").unwrap();
+    drop(f);
+    for (id, q) in [(11, "退回"), (12, "现在回退")] {
+        let bad = call(&mut s, json!(id), "request_rewind", json!({"decision": "approve", "user_quote": q}));
+        assert!(is_error(&bad), "否定/疑问片段 `{q}` 不得批准回退：{}", text_of(&bad));
+    }
+
+    // 真实批准退回后，旧提议已结算
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f, "{{\"text\":\"没问题，同意退回\",\"user_actor\":\"user\",\"at\":\"2026-11-13T03:01:30Z\"}}").unwrap();
+    drop(f);
+    let ok_rew = call(&mut s, json!(13), "request_rewind", json!({"decision": "approve", "user_quote": "同意退回"}));
+    assert!(!is_error(&ok_rew), "{}", text_of(&ok_rew));
+    assert_eq!(s.host().phase().as_str(), "intake");
+}
+
+#[test]
+fn task_scope_and_conditional_followup_survive_resume_cleanly() {
+    use std::io::Write;
+
+    // 1) Cost -> --resume -> complete_task -> begin_followup_task -> Consultation
+    let home1 = temp_home("resume-scope-cost");
+    let h1 = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home1.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: None,
+    })
+    .expect("open");
+    let mut s1 = Server::new(Cursor::new(Vec::new()), Vec::new(), h1);
+    assert!(!is_error(&call(
+        &mut s1,
+        json!(1),
+        "select_task_scope",
+        json!({"scope": "cost", "reason": "先算租金"}),
+    )));
+    assert!(!is_error(&call(
+        &mut s1,
+        json!(2),
+        "business_cost",
+        json!({
+            "operation": "create",
+            "scenario": "A店",
+            "currency": "CNY",
+            "costs_complete": false,
+            "costs": [{
+                "scenario": "A店",
+                "name": "租金",
+                "treatment": "cash_expense",
+                "amount": null,
+                "period": "month",
+                "basis": "user_provided",
+                "source": "待报价"
+            }]
+        }),
+    )));
+    let case_id = s1.host().case_id().to_string();
+    drop(s1);
+
+    let h1_resumed = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home1),
+        auto_approve_checkpoints: false,
+        resume_case: Some(case_id),
+    })
+    .expect("resume cost");
+    let mut s1_res = Server::new(Cursor::new(Vec::new()), Vec::new(), h1_resumed);
+    let comp = call(
+        &mut s1_res,
+        json!(3),
+        "complete_task",
+        json!({"summary": "已登记A店待报价月租。", "missing": ["月租报价"]}),
+    );
+    assert!(!is_error(&comp), "--resume 后 complete_task 必须恢复 task_scope：{}", text_of(&comp));
+    let fu = call(
+        &mut s1_res,
+        json!(4),
+        "begin_followup_task",
+        json!({"reason": "继续做完整竞争推演"}),
+    );
+    assert!(!is_error(&fu), "--resume 后 begin_followup_task 必须成功：{}", text_of(&fu));
+    let consult = call(
+        &mut s1_res,
+        json!(5),
+        "select_task_scope",
+        json!({"scope": "consultation", "reason": "开启完整推演"}),
+    );
+    assert!(!is_error(&consult), "{}", text_of(&consult));
+
+    // 2) Conditional -> --resume -> begin_followup_task 必须清理下游建模产物，不得回流到 intake
+    let home2 = temp_home("resume-cond-followup");
+    let runtime_dir = home2.join("runtime");
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    let ledger = runtime_dir.join("trusted_user_inputs.jsonl");
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        &ledger,
+        format!("{{\"text\":\"我方收益为3，对手收益不知道\",\"user_actor\":\"user\",\"unix_secs\":{now_secs},\"at\":\"2026-11-13T04:00:00Z\"}}\n"),
+    )
+    .unwrap();
+
+    let h2 = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home2.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: None,
+    })
+    .expect("open2");
+    let mut s2 = Server::new(Cursor::new(Vec::new()), Vec::new(), h2);
+    call(&mut s2, json!(1), "select_task_scope", json!({"scope": "consultation", "reason": "完整分析"}));
+    call(&mut s2, json!(2), "vn_map", json!({}));
+    call(
+        &mut s2,
+        json!(3),
+        "participant_profile_update",
+        json!({"participant_id": "us", "value_net_role": "focal", "relation_to_game": "player", "common": {"interests": ["利润"], "resources": ["门店"]}}),
+    );
+    call(
+        &mut s2,
+        json!(4),
+        "participant_profile_update",
+        json!({"participant_id": "rival", "value_net_role": "substitutor", "relation_to_game": "player", "common": {"interests": ["份额"], "resources": ["品牌"]}}),
+    );
+    call(&mut s2, json!(5), "checkpoint", json!({"items": [{"id": "i1", "content": "双方边界"}]}));
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f, "{{\"text\":\"同意双方边界\",\"user_actor\":\"user\",\"at\":\"2026-11-13T04:00:10Z\"}}").unwrap();
+    drop(f);
+    assert!(!is_error(&call(&mut s2, json!(6), "checkpoint", json!({"decision": "approve", "user_quote": "同意双方边界"}))));
+    assert_eq!(s2.host().phase().as_str(), "model_build");
+
+    // 显式交付条件分析
+    let cond = call(&mut s2, json!(7), "conditional_analysis", json!({"reason": "对手收益尚未取得"}));
+    assert!(!is_error(&cond), "{}", text_of(&cond));
+    let cond_case = s2.host().case_id().to_string();
+    drop(s2);
+
+    // 跨 --resume 重开后续任务：必须成功回到 intake
+    let h2_res = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home2),
+        auto_approve_checkpoints: false,
+        resume_case: Some(cond_case),
+    })
+    .expect("resume cond");
+    let mut s2_res = Server::new(Cursor::new(Vec::new()), Vec::new(), h2_res);
+    let reopen = call(
+        &mut s2_res,
+        json!(8),
+        "begin_followup_task",
+        json!({"reason": "先单算房租预算"}),
+    );
+    assert!(!is_error(&reopen), "条件分析 --resume 后 begin_followup_task 必须成功：{}", text_of(&reopen));
+    assert_eq!(s2_res.host().phase().as_str(), "intake");
+    assert!(!is_error(&call(
+        &mut s2_res,
+        json!(9),
+        "select_task_scope",
+        json!({"scope": "cost", "reason": "单算房租预算"}),
+    )));
+}

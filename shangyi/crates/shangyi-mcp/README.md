@@ -1,11 +1,11 @@
 # `shangyi-mcp` —— 商奕确定性博弈引擎的 MCP 服务端（v0.3）
 
-一句话：`shangyi mcp-serve` 启动一个 **JSON-RPC 2.0 over stdio** 服务，向 DeepSeek Harness（DSH）暴露 `shangyi-tools` 注册表中的**全部 38 个确定性领域工具**以及**全部只读知识库/剧本 MCP Resources**。工具执行、精确求解、阶段闸门、双通道真人 Checkpoint 确认与 `case.jsonl` 事件留档全部在 Rust 侧完成。
+一句话：`shangyi mcp-serve` 启动一个 **JSON-RPC 2.0 over stdio** 服务，向 DeepSeek Harness（DSH）暴露 `shangyi-tools` 注册表中的**全部 39 个确定性领域工具**以及**全部只读知识库/剧本 MCP Resources**。工具执行、精确求解、阶段闸门、双通道真人 Checkpoint 确认与 `case.jsonl` 事件留档全部在 Rust 侧完成。
 
 ```text
   DSH（宿主流式循环 + Web 工作台）         shangyi mcp-serve（纯 Rust）
   ┌────────────────────────────┐  stdio   ┌──────────────────────────────────┐
-  │ agent loop / Magpie 路由   │◀────────▶│ ToolRegistry（38 个领域工具）    │
+  │ agent loop / Magpie 路由   │◀────────▶│ ToolRegistry（39 个领域工具）    │
   │ dsh-plugin-shangyi(-wb)    │ JSON-RPC │ MCP Resources（35 KB + 4 剧本）  │
   │  ├ POST /api/shangyi/cp    │───┐      │ DomainExecutor（精确求解/检索）  │
   │  └ session/event 用户账本  │─┐ │      │ PhaseMachine（8 阶段产物闸门）   │
@@ -61,6 +61,6 @@ shangyi mcp-serve [--playbook <id>] [--mode scenario|whatif|discover] [--home <�
 ## 测试门禁
 
 ```bash
-tools/loop/build.sh test -p shangyi-mcp                       # 单元 + 16 项协议/资源/双通道确认集成测试
-tools/loop/build.sh test -p shangyi-cli --test mcp_serve_e2e  # 5 项真实子进程 stdio 端到端测试（含跨进程 checkpoint 核准）
+tools/loop/build.sh test -p shangyi-mcp                       # 24 项单元 + 21 项协议/资源/双通道确认集成测试
+tools/loop/build.sh test -p shangyi-cli --test mcp_serve_e2e  # 6 项真实子进程 stdio 端到端测试（含跨进程 checkpoint 与 --resume 重开）
 ```

@@ -32,7 +32,49 @@ window.__ModuleLoader__.load({
     var MUTED = { color: "var(--dsw-alias-label-secondary, #555752)" };
     var SMALL = { color: "var(--dsw-alias-label-tertiary, #7A7C76)", fontSize: 11 };
 
-    function fmt(n) { return typeof n === "number" ? n.toLocaleString("en-US") : String(n); }
+    function fmt(n) { return typeof n === "number" ? n.toLocaleString("zh-CN") : String(n); }
+
+    var PHASE_ZH = {
+      intake: "受理", intel: "情报", model_build: "建模", solve: "求解",
+      select: "选择", consequence: "后果", discover: "发现", recommend: "建议",
+      report: "报告", archived: "归档"
+    };
+    var MODE_ZH = { scenario: "情景推演", whatif: "后果推演", discover: "策略发现", consult: "咨询", research: "研究", cost: "费用测算" };
+    var PLAYBOOK_ZH = { pricing_response: "调价 / 促销响应", market_entry: "市场进入", negotiation: "谈判对策", competitor_intel: "竞对情报" };
+    var CP_ZH = { cp1: "关口 1 · 立案边界（cp1）", cp2: "关口 2 · 博弈模型与证据（cp2）", cp3: "关口 3 · 最终建议核准（cp3）" };
+    var STATUS_ZH = { running: "未收尾", waiting: "待确认", done: "已完成", stuck: "卡住" };
+    var ROUTE_ZH = { SupportEnumeration: "支持枚举（精确）", LemkeHowson: "Lemke–Howson（交叉检查）", Analytic: "解析求根" };
+    var EQ_KIND_ZH = { Pure: "纯策略", pure: "纯策略", Mixed: "混合策略", mixed: "混合策略" };
+
+    function zhCompleteness(v) {
+      if (!v) return "—";
+      if (v === "Complete") return "完备";
+      if (v === "Partial") return "不完备";
+      if (v === "NotGuaranteed") return "不保证完备";
+      var s = String(v);
+      if (s.indexOf("Partial") === 0) {
+        var m = s.match(/unsupported:\s*(\d+),\s*underdetermined:\s*(\d+),\s*ghost:\s*(\d+)/);
+        return m ? ("部分完备（超范围 " + m[1] + " · 欠定 " + m[2] + " · 幽灵 " + m[3] + "）") : "部分完备";
+      }
+      if (s.indexOf("NotGuaranteed") === 0) {
+        var am = s.match(/algorithm:\s*"([^"]+)"/);
+        return am ? ("不保证完备（" + am[1] + "）") : "不保证完备";
+      }
+      return s;
+    }
+
+    function zhConfidence(conf) {
+      if (!conf) return "本案例未产出选择分布（只到 solve 阶段）";
+      if (conf.PriorUncalibrated) {
+        return "权重未校准（样本 " + conf.PriorUncalibrated.samples + "/" + conf.PriorUncalibrated.needed + "）";
+      }
+      if (conf.Calibrated) {
+        var c = conf.Calibrated;
+        var extra = typeof c.mean_log_loss === "number" ? (" · 平均对数损失 " + c.mean_log_loss.toFixed(3)) : "";
+        return "已校准（样本 " + c.samples + " · 筛选器 " + (Array.isArray(c.selectors) ? c.selectors.length : 0) + extra + "）";
+      }
+      return JSON.stringify(conf);
+    }
 
     function Card(props) {
       return h("section", { style: CARD },
@@ -42,11 +84,18 @@ window.__ModuleLoader__.load({
 
     function MetaCard(props) {
       var m = props.meta;
+      var modePb = [MODE_ZH[m.mode] || m.mode, PLAYBOOK_ZH[m.playbook] || m.playbook].filter(Boolean).join(" / ") || "—";
+      var phases = (m.phases && m.phases.length)
+        ? m.phases.map(function (p) { return PHASE_ZH[p] || p; }).join(" → ")
+        : "（本案例日志无阶段事件）";
+      var cps = (m.checkpoints && m.checkpoints.length)
+        ? m.checkpoints.map(function (c) { return CP_ZH[c] || c; }).join("、")
+        : "—";
       var rows = [
         ["案例", m.case_id],
-        ["模式 / 剧本", [m.mode, m.playbook].filter(Boolean).join(" / ") || "—"],
-        ["阶段", (m.phases && m.phases.length) ? m.phases.join(" → ") : "（本案例日志无阶段事件）"],
-        ["确认点", (m.checkpoints && m.checkpoints.length) ? m.checkpoints.join("、") : "—"],
+        ["模式 / 剧本", modePb],
+        ["阶段", phases],
+        ["确认点", cps],
         ["轮次 / 工具调用", fmt(m.turns) + " / " + fmt(m.tools)],
         ["token（输入+输出）", fmt(m.tokens)],
         ["事件数", fmt(m.events)]
@@ -101,21 +150,18 @@ window.__ModuleLoader__.load({
       }
       var probs = {};
       (sel && sel.entries || []).forEach(function (e) { probs[e.equilibrium_id] = e.prob; });
-      var conf = sel && sel.confidence;
-      var confText = conf && conf.PriorUncalibrated
-        ? "权重未校准（样本 " + conf.PriorUncalibrated.samples + "/" + conf.PriorUncalibrated.needed + "）"
-        : (conf ? JSON.stringify(conf) : "本案例未产出选择分布（只到 solve 阶段）");
-      return h(Card, { title: "均衡与选择", tag: h("span", { style: TAG_REAL }, s.route || "真实数据") },
+      var confText = zhConfidence(sel && sel.confidence);
+      return h(Card, { title: "均衡与选择", tag: h("span", { style: TAG_REAL }, ROUTE_ZH[s.route] || s.route || "真实数据") },
         s.equilibria.map(function (e) {
           var p = probs[e.id];
           return h("div", { key: e.id, style: { marginBottom: 9 } },
             h("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 } },
-              h("span", null, e.id + " · " + e.kind + (e.payoffs ? " · 支付 [" + e.payoffs.join(", ") + "]" : "")),
+              h("span", null, e.id + " · " + (EQ_KIND_ZH[e.kind] || e.kind) + (e.payoffs ? " · 支付 [" + e.payoffs.join(", ") + "]" : "")),
               typeof p === "number" ? h("span", { style: MUTED }, Math.round(p * 100) + "%") : null),
             typeof p === "number" ? bar(p) : null);
         }),
         h("div", { style: Object.assign({ marginTop: 4 }, MUTED) }, confText),
-        h("div", { style: SMALL }, "完整度：" + (s.completeness || "—")));
+        h("div", { style: SMALL }, "完整度：" + zhCompleteness(s.completeness)));
     }
 
     function FailureCard(props) {
@@ -145,7 +191,9 @@ window.__ModuleLoader__.load({
       }, cases.map(function (c) {
         var flag = c.hasMatrix || c.hasSolve ? " [博弈]" : "";
         var d = c.mtime ? c.mtime.slice(0, 10) : "";
-        return h("option", { key: c.caseId, value: c.caseId }, d + " " + c.mode + " · " + c.caseId.replace(/^case-/, "") + flag);
+        var modeTxt = MODE_ZH[c.mode] || c.mode || "未知";
+        var statusTxt = c.status && STATUS_ZH[c.status] ? (" [" + STATUS_ZH[c.status] + "]") : "";
+        return h("option", { key: c.caseId, value: c.caseId }, d + " " + modeTxt + " · " + c.caseId.replace(/^case-/, "") + flag + statusTxt);
       }));
     }
 
@@ -183,7 +231,12 @@ window.__ModuleLoader__.load({
           h("button", { style: Object.assign({ marginTop: 8 }, BTN), onClick: function () { load("latest-cards"); } }, "重试"));
       } else {
         var d = state.data;
+        var badAlert = d.source && d.source.badLines > 0
+          ? h("div", { style: { marginBottom: 10, padding: "6px 10px", borderRadius: 8, border: "1px solid var(--dsw-alias-state-warn-primary, #986618)", color: "var(--dsw-alias-state-warn-primary, #986618)", fontSize: 12 } },
+              "日志存在坏行 " + fmt(d.source.badLines) + " 条（已跳过，未纳入卡片数字）。")
+          : null;
         body = h(React.Fragment, null,
+          badAlert,
           h(MetaCard, { meta: d.meta }),
           h(MatrixCard, { matrix: d.matrix }),
           h(EquilibriumCard, { solve: d.solve, selection: d.selection }),

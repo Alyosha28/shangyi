@@ -502,3 +502,79 @@ fn followup_task_lifecycle_works_end_to_end_in_mcp_serve() {
     );
     assert_eq!(s2["isError"], json!(false), "重开后重新选定 research 范围应成功：{s2}");
 }
+
+#[test]
+fn followup_and_task_scope_survive_mcp_serve_resume_e2e() {
+    let home_dir = temp_home("e2e-resume-scope");
+    let home = home_str(&home_dir);
+
+    {
+        let mut child1 = McpChild::spawn(&["mcp-serve", "--home", home.as_str()]);
+        let _ = child1.request(
+            json!(1),
+            "initialize",
+            json!({"protocolVersion": "2025-11-25", "capabilities": {}}),
+        );
+        let s1 = child1.call_tool(
+            json!(2),
+            "select_task_scope",
+            json!({"scope": "cost", "reason": "首轮先算门店成本"}),
+        );
+        assert_eq!(s1["isError"], json!(false), "{s1}");
+        let c1 = child1.call_tool(
+            json!(3),
+            "business_cost",
+            json!({
+                "operation": "create",
+                "scenario": "A店成本",
+                "currency": "CNY",
+                "costs_complete": false,
+                "costs": [{
+                    "scenario": "A店成本",
+                    "name": "租金",
+                    "treatment": "cash_expense",
+                    "amount": null,
+                    "period": "month",
+                    "basis": "user_provided",
+                    "source": "待报价"
+                }]
+            }),
+        );
+        assert_eq!(c1["isError"], json!(false), "{c1}");
+    }
+
+    // 重启子进程并 --resume latest，验证 complete_task → begin_followup_task → consultation 多轮串联
+    let mut child2 = McpChild::spawn(&["mcp-serve", "--home", home.as_str(), "--resume", "latest"]);
+    let _ = child2.request(
+        json!(1),
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": {}}),
+    );
+    let done1 = child2.call_tool(
+        json!(2),
+        "complete_task",
+        json!({"summary": "已登记A店待报价租金。", "missing": ["租金报价"]}),
+    );
+    assert_eq!(done1["isError"], json!(false), "--resume 后 complete_task 应成功：{done1}");
+
+    let reopen = child2.call_tool(
+        json!(3),
+        "begin_followup_task",
+        json!({"reason": "继续切换为完整博弈推演"}),
+    );
+    assert_eq!(reopen["isError"], json!(false), "--resume 后 begin_followup_task 应成功：{reopen}");
+
+    let consult = child2.call_tool(
+        json!(4),
+        "select_task_scope",
+        json!({
+            "scope": "consultation",
+            "mode": "whatif",
+            "playbook": "pricing_response",
+            "reason": "按完整博弈推演价格战后果"
+        }),
+    );
+    assert_eq!(consult["isError"], json!(false), "{consult}");
+    let out_text = consult["content"][0]["text"].as_str().unwrap_or("");
+    assert!(out_text.contains("\"mode\":\"whatif\""), "应切换至 whatif：{out_text}");
+}

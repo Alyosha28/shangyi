@@ -127,7 +127,29 @@
       consultation: "完整博弈咨询",
       research: "调研快答",
       cost: "费用测算",
+      research_and_cost: "调研与费用测算",
+      conditional: "条件分析（证据未齐）",
       "task_scope:full_consult": "完整博弈咨询"
+    };
+
+    SYData.GAME_FORM_LABELS = {
+      normal: "同步博弈（策略式）",
+      Normal: "同步博弈（策略式）",
+      extensive: "序贯博弈（扩展式）",
+      Extensive: "序贯博弈（扩展式）"
+    };
+
+    SYData.TOOL_STATUS_LABELS = {
+      ok: "正常",
+      failed: "失败",
+      blocked: "未取得",
+      unknown: "结局未知"
+    };
+
+    SYData.CHECKPOINT_LABELS = {
+      cp1: "关口 1 · 立案边界（cp1）",
+      cp2: "关口 2 · 博弈模型与证据（cp2）",
+      cp3: "关口 3 · 最终建议核准（cp3）"
     };
 
     SYData.phaseLabel = function (id) {
@@ -143,6 +165,21 @@
     SYData.scopeLabel = function (id) {
       if (!id) return "—";
       return SYData.SCOPE_LABELS[id] || String(id);
+    };
+
+    SYData.gameFormLabel = function (id) {
+      if (!id) return "—";
+      return SYData.GAME_FORM_LABELS[id] || String(id);
+    };
+
+    SYData.toolStatusLabel = function (id) {
+      if (!id) return "—";
+      return SYData.TOOL_STATUS_LABELS[id] || String(id);
+    };
+
+    SYData.checkpointLabel = function (id) {
+      if (!id) return "—";
+      return SYData.CHECKPOINT_LABELS[id] || String(id);
     };
 
     /** /api/shangyi/cases → 前端列表项（字段缺失一律容忍：host-data 还在补 phase/status）。 */

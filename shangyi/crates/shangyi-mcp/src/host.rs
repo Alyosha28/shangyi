@@ -395,7 +395,9 @@ impl SessionHost {
                 Event::TaskScopeSelected { scope, .. } => {
                     if machine.phase() == SessionPhase::Intake && machine.scoped_result().is_none()
                     {
-                        let _ = machine.select_task_scope(*scope);
+                        if machine.select_task_scope(*scope).is_ok() {
+                            executor.set_task_scope(Some(*scope));
+                        }
                     }
                 }
                 Event::ToolCallStarted {
@@ -490,9 +492,11 @@ impl SessionHost {
                 }
                 Event::ScopedTaskCompleted { result, .. } => {
                     if result.scope == TaskScope::Conditional {
-                        let _ = machine.finish_conditional_task(result.clone());
-                    } else {
-                        let _ = machine.finish_scoped_task(result.clone());
+                        if machine.finish_conditional_task(result.clone()).is_ok() {
+                            executor.set_task_scope(Some(TaskScope::Conditional));
+                        }
+                    } else if machine.finish_scoped_task(result.clone()).is_ok() {
+                        executor.set_task_scope(Some(result.scope));
                     }
                     post_completion_user_messages.clear();
                 }
@@ -814,10 +818,10 @@ impl SessionHost {
                     log_outcome: ToolOutcome::Failed { error: reason },
                 }
             }
-            None if name == "checkpoint" && arguments.get("decision").is_some() => {
+            None if name == "checkpoint" && arguments.get("decision").is_some_and(|v| !v.is_null()) => {
                 self.settle_conversational_checkpoint(&arguments, phase_before, &at)
             }
-            None if name == "request_rewind" && arguments.get("decision").is_some() => {
+            None if name == "request_rewind" && arguments.get("decision").is_some_and(|v| !v.is_null()) => {
                 self.settle_conversational_rewind(&arguments, phase_before, &at)
             }
             None => {
@@ -876,59 +880,117 @@ impl SessionHost {
         arguments: &Value,
         switched_playbook: &mut Option<String>,
     ) -> Result<(), String> {
-        if let Some(pb_val) = arguments.get("playbook") {
+        // 1) 全量预校验后再原子提交，避免部分字段合法而其余字段或 scope 非法时留下半更新状态。
+        let next_playbook: Option<Playbook> = if let Some(pb_val) = arguments.get("playbook") {
             let pb_id = pb_val
                 .as_str()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| "`select_task_scope.playbook` 必须是非空字符串".to_string())?;
             if pb_id != self.playbook.meta.id {
-                let pb = load_playbook(Some(pb_id), self.explicit_home.as_deref())
-                    .map_err(|e| e.to_string())?;
-                let pb_static: &'static Playbook = Box::leak(Box::new(pb));
-                self.playbook = pb_static;
-                self.executor.set_playbook(pb_static);
-                if let Some(header) = &mut self.pending_header {
-                    header.playbook_id = pb_static.meta.id.clone();
-                }
-                *switched_playbook = Some(pb_static.meta.id.clone());
+                Some(
+                    load_playbook(Some(pb_id), self.explicit_home.as_deref())
+                        .map_err(|e| e.to_string())?,
+                )
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
-        if let Some(mode_val) = arguments.get("mode") {
+        let next_mode: Option<ConsultationMode> = if let Some(mode_val) = arguments.get("mode") {
             let mode_str = mode_val
                 .as_str()
                 .map(str::trim)
                 .ok_or_else(|| "`select_task_scope.mode` 必须是字符串".to_string())?;
             let new_mode = parse_consultation_mode(mode_str).ok_or_else(|| {
-                format!(
-                    "未知咨询模式 `{mode_str}`（允许：scenario / whatif / discover）"
-                )
+                format!("未知咨询模式 `{mode_str}`（允许：scenario / whatif / discover）")
             })?;
             if new_mode != self.mode {
-                let prev_scope = self.machine.task_scope();
-                self.mode = new_mode;
-                self.executor.set_mode(new_mode);
-                self.machine =
-                    shangyi_core::PhaseMachine::new(new_mode).require_task_scope_selection();
-                if let Some(sc) = prev_scope {
-                    let _ = self.machine.select_task_scope(sc);
+                if self.machine.checkpoint_status(CheckpointId::Cp1).is_some() {
+                    return Err(
+                        "当前已在 intake 打开或核准 cp1，不能静默切换咨询 mode；请先完成或重新开启任务。"
+                            .to_string(),
+                    );
                 }
-                if let Some(header) = &mut self.pending_header {
-                    header.mode = new_mode.as_str().to_string();
-                }
+                Some(new_mode)
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
-        if let Some(action_val) = arguments.get("action") {
+        let next_action: Option<String> = if let Some(action_val) = arguments.get("action") {
             if !action_val.is_null() {
                 let act = action_val
                     .as_str()
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .ok_or_else(|| "`select_task_scope.action` 必须是非空字符串".to_string())?;
-                self.action = Some(act.to_string());
+                Some(act.to_string())
+            } else {
+                None
             }
+        } else {
+            None
+        };
+
+        // 同步校验 select_task_scope 自身必选条件，防止动态切换 mode/playbook 后执行阶段失败造成双端漂移。
+        let parsed_scope = serde_json::from_value::<TaskScope>(
+            arguments.get("scope").cloned().unwrap_or_default(),
+        )
+        .map_err(|_| "scope 须为 research/cost/research_and_cost/consultation".to_string())?;
+        if parsed_scope == TaskScope::Conditional {
+            return Err(
+                "条件比较不能作为开场范围来绕过咨询；只有真实证据缺口才能交付明确的条件分析。"
+                    .to_string(),
+            );
+        }
+        if !arguments
+            .get("reason")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            return Err("须根据用户原话说明选择此范围的 reason，不能默认扩大任务".to_string());
+        }
+        if parsed_scope == TaskScope::Consultation {
+            let eff_mode = next_mode.unwrap_or(self.mode);
+            let eff_pb = next_playbook.as_ref().unwrap_or(self.playbook);
+            shangyi_core::consultation::check_playbook_supports_mode(eff_mode, eff_pb)?;
+        }
+
+        // 2) 全部校验通过：统一原子写入状态。
+        if let Some(pb) = next_playbook {
+            let pb_static: &'static Playbook = Box::leak(Box::new(pb));
+            self.playbook = pb_static;
+            self.executor.set_playbook(pb_static);
+            if let Some(header) = &mut self.pending_header {
+                header.playbook_id = pb_static.meta.id.clone();
+            }
+            *switched_playbook = Some(pb_static.meta.id.clone());
+        }
+
+        if let Some(new_mode) = next_mode {
+            let prev_scope = self.machine.task_scope();
+            self.mode = new_mode;
+            self.executor.set_mode(new_mode);
+            self.machine =
+                shangyi_core::PhaseMachine::new(new_mode).require_task_scope_selection();
+            if let Some(sc) = prev_scope {
+                let _ = self.machine.select_task_scope(sc);
+            }
+            for (kind, fp) in self.executor.artifacts() {
+                self.machine.record(kind, fp);
+            }
+            if let Some(header) = &mut self.pending_header {
+                header.mode = new_mode.as_str().to_string();
+            }
+        }
+
+        if let Some(act) = next_action {
+            self.action = Some(act);
         }
         Ok(())
     }
@@ -1022,20 +1084,16 @@ impl SessionHost {
         }
 
         let verified = self.post_checkpoint_user_messages.iter().any(|msg| {
-            msg.match_indices(&user_quote).any(|(pos, _)| {
-                if decision != "approve" {
-                    return true;
-                }
-                let prefix = msg[..pos].trim_end();
-                !["不", "未", "别", "勿", "没", "并非", "不要", "拒绝", "驳回"]
-                    .iter()
-                    .any(|neg| prefix.ends_with(neg))
-            })
+            if decision == "approve" {
+                quote_is_unambiguous_approval(msg, &user_quote)
+            } else {
+                msg.contains(&user_quote)
+            }
         });
         if !verified {
             let err = format!(
-                "拒绝结算 checkpoint `{}`（铁律 2 强制门禁）：未在当前关口打开之后的真实用户消息中找到原文片段 `{user_quote}`。\
-                 严禁模型自行代批或引用关口打开前的旧消息；请先等待用户真实回复，或请用户在工作台点击「核准通过」。",
+                "拒绝结算 checkpoint `{}`（铁律 2 强制门禁）：未在当前关口打开之后的真实用户消息中找到无否定/无疑问的同意片段 `{user_quote}`。\
+                 严禁模型自行代批、断章取义否定/疑问句，或引用关口打开前的旧消息；请先等待用户真实回复，或请用户在工作台点击「核准通过」。",
                 cp_id.as_str()
             );
             return Rendered {
@@ -1212,20 +1270,16 @@ impl SessionHost {
         }
 
         let verified = self.post_rewind_user_messages.iter().any(|msg| {
-            msg.match_indices(&user_quote).any(|(pos, _)| {
-                if decision != "approve" {
-                    return true;
-                }
-                let prefix = msg[..pos].trim_end();
-                !["不", "未", "别", "勿", "没", "并非", "不要", "拒绝", "驳回"]
-                    .iter()
-                    .any(|neg| prefix.ends_with(neg))
-            })
+            if decision == "approve" {
+                quote_is_unambiguous_approval(msg, &user_quote)
+            } else {
+                msg.contains(&user_quote)
+            }
         });
         if !verified {
             let err = format!(
-                "拒绝执行 `request_rewind` 阶段回退（铁律 2 强制门禁）：未在回退提议发出之后的真实用户消息中找到原文片段 `{user_quote}`。\
-                 严禁模型自行代批或引用回退提议前的旧消息；请先等待用户真实确认回复。"
+                "拒绝执行 `request_rewind` 阶段回退（铁律 2 强制门禁）：未在回退提议发出之后的真实用户消息中找到无否定/无疑问的同意片段 `{user_quote}`。\
+                 严禁模型自行代批、断章取义否定/疑问句，或引用回退提议前的旧消息；请先等待用户明确确认。"
             );
             return Rendered {
                 is_error: true,
@@ -1490,7 +1544,19 @@ impl SessionHost {
             return;
         }
         let from = self.machine.phase();
-        if let Some(to) = self.machine.invalidate_user_dependent_artifacts(&invalidated) {
+        let rewound_to = self.machine.invalidate_user_dependent_artifacts(&invalidated);
+        if !has_open_checkpoint(&self.machine) {
+            self.post_checkpoint_user_messages.clear();
+        }
+        if let Some(to) = rewound_to {
+            if self
+                .pending_rewind
+                .as_ref()
+                .is_some_and(|p| !self.machine.graph().is_earlier(p.target, to))
+            {
+                self.pending_rewind = None;
+                self.post_rewind_user_messages.clear();
+            }
             self.append_or_buffer_event(Event::PhaseRewound {
                 from: from.as_str().to_string(),
                 to: to.as_str().to_string(),
@@ -1722,6 +1788,18 @@ impl SessionHost {
                 }
             }
             ExecOutcome::RewindRequest { target, reason } => {
+                if let Some(existing) = &self.pending_rewind {
+                    let err = format!(
+                        "当前已有待用户确认的回退提议（目标阶段 `{}`）；请先等待用户回复并调用 `request_rewind(decision=\"approve\"|\"reject\", user_quote=\"用户原话\")` 结算，不得静默覆盖待决提议。",
+                        existing.target.as_str()
+                    );
+                    return Rendered {
+                        is_error: true,
+                        content: vec![format!("工具 `request_rewind` 调用失败：{err}")],
+                        suspend: true,
+                        log_outcome: ToolOutcome::Failed { error: err },
+                    };
+                }
                 let from = self.machine.phase();
                 self.pending_rewind = Some(PendingRewind {
                     from,
@@ -2257,5 +2335,209 @@ fn seq_from_clock(iso: &str) -> String {
         digits[8..14].to_string()
     } else {
         "000000".to_string()
+    }
+}
+
+fn is_sentence_delim(ch: char) -> bool {
+    matches!(ch, '。' | '！' | '？' | '!' | '?' | '\n' | ';' | '；')
+}
+
+fn is_clause_delim(ch: char) -> bool {
+    is_sentence_delim(ch) || matches!(ch, '，' | ',' | '.' | '、')
+}
+
+fn strip_positive_idioms(s: &str) -> String {
+    let mut out = s.to_string();
+    for idiom in [
+        "不用怀疑",
+        "不用多疑",
+        "不用疑",
+        "不用客气",
+        "不必客气",
+        "别客气",
+        "不用多说",
+        "不用说",
+        "不用再改",
+        "不用改了",
+        "不用改",
+        "不用再等",
+        "别等了",
+        "别耽误了",
+        "不必再等",
+        "没有问题",
+        "没问题",
+        "没有意见",
+        "没意见",
+        "毫无疑议",
+        "无异议",
+        "不反对",
+        "没反对",
+        "不拒绝",
+        "没拒绝",
+        "不错",
+        "不再犹豫",
+        "不要犹豫",
+        "no problem",
+        "not bad",
+        "don't hesitate",
+    ] {
+        out = out.replace(idiom, " ");
+    }
+    out
+}
+
+fn contains_ascii_refusal_word(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    if lower.contains("do not") {
+        return true;
+    }
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '\'')
+        .any(|w| {
+            matches!(
+                w,
+                "no" | "not"
+                    | "never"
+                    | "don't"
+                    | "dont"
+                    | "won't"
+                    | "wont"
+                    | "can't"
+                    | "cant"
+                    | "cannot"
+                    | "reject"
+                    | "decline"
+                    | "cancel"
+                    | "disapprove"
+                    | "stop"
+                    | "hold"
+            )
+        })
+}
+
+fn has_clause_negation(s: &str) -> bool {
+    let clean = strip_positive_idioms(s);
+    const ZH_NEGATORS: &[&str] = &[
+        "不", "未", "别", "勿", "没", "并非", "反对", "拒绝", "驳回", "暂缓", "暂停", "延后",
+        "取消", "作废", "撤回", "推翻", "才怪",
+    ];
+    ZH_NEGATORS.iter().any(|neg| clean.contains(neg)) || contains_ascii_refusal_word(&clean)
+}
+
+fn quote_contains_refusal(quote: &str) -> bool {
+    let clean = strip_positive_idioms(quote);
+    const REFUSAL_PHRASES: &[&str] = &[
+        "不同意", "不批准", "不核准", "不通过", "不确认", "不认可", "不接受", "不支持", "不建议",
+        "不用", "不要", "不回退", "不退回", "别回退", "别退回", "别通过", "别确认", "别同意",
+        "别急", "先别", "先不", "勿", "并非", "未同意", "未通过", "未确认", "反对", "拒绝",
+        "驳回", "暂缓", "暂停", "延后", "取消", "作废", "撤回", "推翻", "不行", "不可以", "不能",
+        "不可", "才怪",
+    ];
+    REFUSAL_PHRASES.iter().any(|p| clean.contains(p)) || contains_ascii_refusal_word(&clean)
+}
+
+fn quote_is_unambiguous_approval(msg: &str, quote: &str) -> bool {
+    if quote.contains(['?', '？', '吗']) || quote_contains_refusal(quote) {
+        return false;
+    }
+    msg.match_indices(quote).any(|(pos, _)| {
+        let end_pos = pos + quote.len();
+
+        // 1) Enclosing sentence must not be a question or contain trailing deferral/reversal.
+        let sent_start = msg[..pos]
+            .char_indices()
+            .rfind(|&(_, ch)| is_sentence_delim(ch))
+            .map(|(idx, ch)| idx + ch.len_utf8())
+            .unwrap_or(0);
+        let sent_end = msg[end_pos..]
+            .char_indices()
+            .find(|&(_, ch)| is_sentence_delim(ch))
+            .map(|(idx, ch)| end_pos + idx + ch.len_utf8())
+            .unwrap_or(msg.len());
+        let sent_body = msg[sent_start..sent_end]
+            .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '。' | '！' | '!' | ';' | '；'));
+        if sent_body.ends_with(['?', '？', '吗'])
+            || ["行么", "好么", "对么", "是么", "可以么"]
+                .iter()
+                .any(|q| sent_body.ends_with(q))
+        {
+            return false;
+        }
+
+        // 2) Enclosing clause span around the match must not contain question words or negations.
+        let clause_start = msg[..pos]
+            .char_indices()
+            .rfind(|&(_, ch)| is_clause_delim(ch))
+            .map(|(idx, ch)| idx + ch.len_utf8())
+            .unwrap_or(0);
+        let clause_end = msg[end_pos..]
+            .char_indices()
+            .find(|&(_, ch)| is_clause_delim(ch))
+            .map(|(idx, _)| end_pos + idx)
+            .unwrap_or(msg.len());
+        let clause = &msg[clause_start..clause_end];
+        if clause.contains(['?', '？', '吗'])
+            || [
+                "是否", "能否", "可否", "行不行", "可不可以", "能不能", "要不要", "好不好",
+                "对不对", "是不是", "行么", "好么", "对么", "是么", "可以么",
+            ]
+            .iter()
+            .any(|q| clause.contains(q))
+        {
+            return false;
+        }
+
+        let before = &msg[clause_start..pos];
+        let after = &msg[end_pos..clause_end];
+        if has_clause_negation(before) || has_clause_negation(after) {
+            return false;
+        }
+
+        // 3) Guard against same-sentence trailing deferral/reversal after an affirmative first clause.
+        let tail_clean = strip_positive_idioms(&msg[clause_end..sent_end]);
+        const TAIL_REVERSALS: &[&str] = &[
+            "先不", "先别", "别急", "暂缓", "暂停", "延后", "不同意", "不批准", "不核准",
+            "不通过", "不确认", "不回退", "不退回", "不要", "拒绝", "驳回", "反对", "取消",
+            "再等等", "先等等", "不行",
+        ];
+        if TAIL_REVERSALS.iter().any(|t| tail_clean.contains(t))
+            || contains_ascii_refusal_word(&tail_clean)
+        {
+            return false;
+        }
+
+        true
+    })
+}
+
+#[cfg(test)]
+mod approval_quote_tests {
+    use super::quote_is_unambiguous_approval;
+
+    #[test]
+    fn blocks_negation_and_question_bypasses() {
+        assert!(!quote_is_unambiguous_approval("先不用退回", "退回"));
+        assert!(!quote_is_unambiguous_approval("不建议退回", "退回"));
+        assert!(!quote_is_unambiguous_approval("先别急着同意", "同意"));
+        assert!(!quote_is_unambiguous_approval("我不同意现在回退", "现在回退"));
+        assert!(!quote_is_unambiguous_approval("我反对确认", "确认"));
+        assert!(!quote_is_unambiguous_approval("退回是不行的", "退回"));
+        assert!(!quote_is_unambiguous_approval("能退回吗？", "退回"));
+        assert!(!quote_is_unambiguous_approval("是否确认当前模型", "确认当前模型"));
+        assert!(!quote_is_unambiguous_approval("同意方向，不过先别退回", "同意方向"));
+        assert!(!quote_is_unambiguous_approval("no, don't approve this", "approve"));
+        assert!(!quote_is_unambiguous_approval("不同意", "不同意"));
+    }
+
+    #[test]
+    fn allows_genuine_user_approvals() {
+        assert!(quote_is_unambiguous_approval("同意退回情报阶段", "同意退回情报阶段"));
+        assert!(quote_is_unambiguous_approval("不错，同意确认", "同意确认"));
+        assert!(quote_is_unambiguous_approval("不用改了，直接通过", "直接通过"));
+        assert!(quote_is_unambiguous_approval("不用怀疑我同意", "我同意"));
+        assert!(quote_is_unambiguous_approval("没问题，核准推进", "核准推进"));
+        assert!(quote_is_unambiguous_approval("确认不降价方案", "确认不降价方案"));
+        assert!(quote_is_unambiguous_approval("行吗？可以退回", "可以退回"));
+        assert!(quote_is_unambiguous_approval("yes, approve rewind", "approve rewind"));
     }
 }

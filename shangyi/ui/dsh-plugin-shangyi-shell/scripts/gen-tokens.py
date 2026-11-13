@@ -50,7 +50,7 @@ RAMPS = {
         "light": {
             "paper": ["#EAE3D3", "#F2EDE2", "#F9F5EC", "#FFFCF4"],
             "ink": ["#191510", "#382F22", "#5B5040", "#8B806C", "#B5AB97"],
-            "accent": "#8A6A2F",
+            "accent": "#83642A",
         },
         "dark": {
             "paper": ["#0B0A08", "#111010", "#181612", "#201C16"],
@@ -224,6 +224,10 @@ FUNCTIONAL = {
     "--dsw-alias-file-diff-deleted-bg", "--dsw-alias-file-diff-deleted-gutter",
     "--dsw-alias-file-diff-deleted-marker",
 }
+FUNCTIONAL_TEXT_TOKENS = {
+    "--dsw-alias-state-warn-primary", "--dsw-alias-state-warn-label",
+    "--dsw-alias-state-error-primary", "--dsw-alias-state-success-primary",
+}
 
 KEEP = {  # 纯遮罩：与方向无关
     "--dsw-alias-bg-mask-1", "--dsw-alias-bg-mask-2", "--dsw-alias-bg-mask-3",
@@ -342,7 +346,16 @@ def transform(name, value, ramp, dark):
     if name in SURFACE:
         return hexof(ramp_lookup(ramp["paper"], neutral_x(c, dark)), a if a < 1 else None)
     if name in FUNCTIONAL:
-        return hexof(warmth(c, 0.35), a)
+        rgb = warmth(c, 0.35)
+        if name in FUNCTIONAL_TEXT_TOKENS:
+            # 亮色以最暗纸面 paper[0]、暗色以最亮深纸面 paper[3] 作最严底色，确保 >= 4.65:1
+            bg_ref = parse(ramp["paper"][3] if dark else ramp["paper"][0])
+            ink_ref = parse(ramp["ink"][0])
+            steps = 0
+            while contrast_ratio(rgb, bg_ref) < 4.65 and steps < 50:
+                rgb = mix(rgb, ink_ref, 0.05)
+                steps += 1
+        return hexof(rgb, a)
     if name in SPECIAL:
         if "danger" in name or "error" in name:
             return hexof(warmth(c, 0.3), a)

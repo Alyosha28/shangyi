@@ -306,7 +306,7 @@
         h("div", { className: "sy-sec-h", style: { marginTop: "8px" } },
           "支付矩阵",
           h("span", { className: "sy-tag", style: { marginLeft: "8px" } }, mx.game_id || "未命名博弈"),
-          mx.form ? h("span", { className: "sy-tag is-mute" }, "形式 " + mx.form) : null,
+          mx.form ? h("span", { className: "sy-tag is-mute" }, "形式：" + SYData.gameFormLabel(mx.form)) : null,
           h("span", { className: "sy-tag is-mute" }, players.length + " 名玩家"),
           h("span", { className: "sy-tag is-mute" }, (typeof mx.params === "number" ? mx.params : 0) + " 个参数")),
         h("div", { className: "sy-matrix-wrap" },
@@ -325,6 +325,12 @@
       if (confidence.PriorUncalibrated) {
         var p = confidence.PriorUncalibrated;
         return "选择权重未校准（样本 " + orDash(p.samples) + "/" + orDash(p.needed) + "）。";
+      }
+      if (confidence.Calibrated) {
+        var c = confidence.Calibrated;
+        var nSel = Array.isArray(c.selectors) ? c.selectors.length : 0;
+        var loss = typeof c.mean_log_loss === "number" ? ("，平均对数损失 " + c.mean_log_loss.toFixed(3)) : "";
+        return "选择权重已校准（样本 " + orDash(c.samples) + "，筛选器 " + nSel + " 个" + loss + "）。";
       }
       var keys = Object.keys(confidence);
       if (!keys.length) return "选择分布已产出。";
@@ -389,7 +395,7 @@
         items.push(h("div", { className: "sy-trail-item", key: "c" + j },
           h("div", { className: "sy-trail-when" }, "确认点 " + (j + 1)),
           h("div", { className: "sy-trail-body" },
-            h("div", { className: "sy-trail-tool" }, String(cps[j])),
+            h("div", { className: "sy-trail-tool" }, SYData.checkpointLabel(cps[j])),
             h("div", { className: "sy-trail-detail" }, "已答复（checkpoint_answered）"))));
       }
       var fails = cards.failures || [];
@@ -399,7 +405,7 @@
           h("div", { className: "sy-trail-when" }, "失败"),
           h("div", { className: "sy-trail-body" },
             h("div", { className: "sy-trail-tool" }, orDash(f.tool)),
-            h("div", { className: "sy-trail-detail" }, orDash(f.status) + " · " + orDash(f.detail)))));
+            h("div", { className: "sy-trail-detail" }, SYData.toolStatusLabel(f.status) + " · " + orDash(f.detail)))));
       }
       return h("div", null,
         h("div", { className: "sy-sec-h", style: { marginTop: "8px" } },
@@ -497,11 +503,11 @@
         cards.pendingCheckpoint
           ? h("div", { className: "sy-insp-row" },
             h("span", { className: "sy-k" }, "待确认"),
-            h(SYView.Tag, { tone: "warn" }, String(cards.pendingCheckpoint)))
+            h(SYView.Tag, { tone: "warn" }, SYData.checkpointLabel(cards.pendingCheckpoint)))
           : null,
         (cards.meta.checkpoints || []).length
           ? cards.meta.checkpoints.map(function (cp, i) {
-            return h("div", { className: "sy-insp-row", key: "cp" + i }, h("span", { className: "sy-v", style: { textAlign: "left" } }, String(cp)));
+            return h("div", { className: "sy-insp-row", key: "cp" + i }, h("span", { className: "sy-v", style: { textAlign: "left" } }, SYData.checkpointLabel(cp)));
           })
           : (!cards.pendingCheckpoint ? h("div", { className: "sy-note" }, "本案例没有已答复的确认点。") : null)) : null;
 
