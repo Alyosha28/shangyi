@@ -17,7 +17,8 @@ metadata:
 - 首轮调用 `mcp__shangyi__select_task_scope` 明确本次任务范围：
   - `cost`：纯费用梳理、盈亏平衡与多方案成本对比，用 `mcp__shangyi__business_cost` 完成后直接交付结果与缺口，不擅自扩张为完整博弈咨询。
   - `research`：公开政策、竞争者、展会、价格或主体资料核查，用检索/抓取工具查清后直接交付，不要求用户为公开网页背书。
-  - `consult`：涉及多方策略互动（定价战、门店进入、租约/采购谈判、竞争反制），按八阶段咨询闸门推进；必要时先调用 `mcp__shangyi__session_configure` 选定咨询模式（`scenario`/`whatif`/`discover`）与行业剧本。
+  - `research_and_cost`：兼有公开检索核查与确定性费用测算时使用，先核查/登记公开证据并运行 `mcp__shangyi__business_cost`，再由 `complete_task` 交付。
+  - `consultation`：涉及多方策略互动（定价战、门店进入、租约/采购谈判、竞争反制），在 `mcp__shangyi__select_task_scope` 中按需选定咨询模式（`scenario`/`whatif`/`discover`；`whatif` 须传具体 `action`）与行业剧本，按八阶段咨询闸门推进。
 - 用户纠正条件后，明确说明哪一项已更新、哪些计算结果随之改变；超出用户硬上限的方案只能作为对照基线，不能列为推荐选项。
 
 ## 2. 公开搜索、正文核验与四类日期标签
@@ -32,7 +33,7 @@ metadata:
 ## 3. 确定性计算与判断边界
 
 - **严禁口算**：一切数值换算、期间累计、现金流测算、均衡求解与敏感度翻转点只能逐字引用 `mcp__shangyi__*` 工具输出；未知金额传 `amount: null` 并说明原因，绝不填 `0` 或 `1` 占位。
-- 费用按 **现金费用（`cash_expense`）**、**可退押金（`refundable_deposit`）**、**机会成本（`opportunity_cost`）**、**非现金费用（`noncash_expense`）** 分别列示；期间累计付款不等于首期一次性付清。
+- 费用按 **现金费用（`cash_expense`）**、**可退押金（`refundable_deposit`）**、**机会成本（`opportunity_cost`）**、**非现金费用（`noncash_expense`）** 与 **性质未知（`unknown`）** 分别列示；期间累计付款不等于首期一次性付清。
 - 比较同一主体的不同策略时保持同一时间窗与基准口径；对方另寻客户的收益未知时保留缺口，不得用 `0` 代表其全部收益，也不得将少收租金与同一空置机会损失重复扣除。
 
 ## 4. 面向经营者的可读表达（术语隔离）

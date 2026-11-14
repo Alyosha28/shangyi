@@ -5,7 +5,7 @@
 - **`dsh/profile-web/`**：宣纸·墨玉三栏 Web 工作台版 Profile（`shangyi-web`，基于 `dsh-base` + `dsh-web-app` + 商奕三件套插件 `dsh-plugin-shangyi` / `dsh-plugin-shangyi-shell` / `dsh-plugin-shangyi-workbench`），由 `bash shangyi/ui/scripts/install-workbench.sh` 一键构建并安装；
 - **`dsh/skills/`**：受控项目级技能包（`shangyi-consultation-discipline`、`shangyi-store-location`、`shangyi-dev-verify`），在 `shangyi-web` 的唯一专属预设 `preset-shangyi` 中通过 `includeDefaultRoots: false` 严格隔离加载。
 
-形态一句话：**DSH 负责会话循环、模型路由与 Web 三栏工作台；`shangyi mcp-serve`（纯 Rust）负责全部 38 个确定性领域工具、MCP Resources、阶段/产物闸门、双通道真人 Checkpoint 确认与 `case.jsonl` 审计落盘。**
+形态一句话：**DSH 负责会话循环、模型路由与 Web 三栏工作台；`shangyi mcp-serve`（纯 Rust）负责全部 39 个确定性领域工具、MCP Resources、阶段/产物闸门、双通道真人 Checkpoint 确认与 `case.jsonl` 审计落盘。**
 
 ## 目录
 
@@ -259,7 +259,7 @@ headless bundle 把它设成空串（`@deepseek-ai/dsh-headless/cordis.patch.yml
 | U1 | **真实模型 E2E**：dsh 起会话 → 模型调 `mcp__shangyi__*` → 走完八阶段 | 本 shell 无 `DEEPSEEK_API_KEY` / `MAGPIE_GATEWAY_KEY`；DeepSeek 余额为负（`.shangyi-loop/STATE.md` 记 -0.35 元）。冒烟只到 `MISSING_CREDENTIAL` 为止 | 充值后：`export DEEPSEEK_API_KEY=…` + `SHANGYI_BIN=…` → `dsh --profile shangyi --json "…"`，核对事件流里的工具调用与 provenance |
 | U2 | persona 对模型行为的**实际**约束力（是否真的不再编数字） | 同上，没有一次真实生成 | U1 之后跑对抗用例：给一个缺 payoff 的问题，看它是否报「未取得」而不是编数 |
 | U3 | `toolCallTimeoutMs: 300000` 是否够 | 没有真实求解调用，测不出耗时 | R2 接通后跑 `solve_equilibria` 计时；不够就改这一行 |
-| U4 | `shangyi mcp-serve` 子命令本身 | R2 任务；当前 `shangyi` 只有 `new/resume/solve/report/backtest/kb` 子命令 | 见 §7 的协议要点 |
+| U4 | `shangyi mcp-serve` 子命令本身 | 已实现（`shangyi` CLI 现含 `start`/`ui`、`new`、`resume`、`solve`、`report`、`backtest`、`kb`、`checkpoint`、`mcp-serve` 共 9 个子命令） | 见 §7 的协议要点（协议实测参考） |
 | U5 | 真实 Rust 服务端的 stdio 行为（缓冲/退出/信号） | 同上；本轮用的是 Python 假服务端 | R2 用 `FAKE_MCP_TRACE` 同款手法抓 wire 对比 |
 | U6 | Windows 侧（`tool-pwsh` / `pwsh-sandbox`） | 本机 darwin | 在 Windows 上跑 `tools/dsh/smoke.sh` |
 | U7 | 把 profile 装进真实 `~/.dsh` | 沙箱只允许写 workspace 与 `/tmp`，`~/.dsh` 不可写 | 在有权限的 shell 里跑 `tools/dsh/install-profile.sh`（不带 `DSH_HOME`） |
@@ -267,7 +267,7 @@ headless bundle 把它设成空串（`@deepseek-ai/dsh-headless/cordis.patch.yml
 | U9 | **严格模式下"缺二进制 + 凭据齐备"时模型是否真会带 0 工具作答** | 无凭据，只观测到它走到模型请求这一步（`request/header` 无 `tools` 字段）并因 `MISSING_CREDENTIAL` 失败；无法证明有凭据时的行为 | 充值后：不设 `SHANGYI_BIN` 跑一轮，看模型是否回「领域工具不可用」而不是编数（persona 已加这条兜底） |
 | U10 | 真实 `shangyi` 二进制被 dsh spawn 两次的**开销**（进程启动时间、是否有副作用如写文件） | 本轮用 Python 假服务端，秒级启动；Rust 二进制的启动成本没测 | R2 接通后计时两次 spawn 的耗时；若探针有副作用（写文件/建连接），要设计成幂等 |
 
-## 7. 给 R2（`shangyi mcp-serve`）的协议要点
+## 7. `shangyi mcp-serve` 与 `dsh` 的协议实测要点（协议参考）
 
 这些是**本轮实测出来的**，不是从规范抄的（证据：`FAKE_MCP_TRACE` 抓的 wire + dsh 的报错原文）：
 

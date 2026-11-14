@@ -231,7 +231,7 @@ function makeFetch({ failCases = false, failCards = false, kb = 'ok' } = {}) {
       return { ok: true, status: 200, json: async () => FIX_KB }
     }
     if (u.startsWith('/api/shangyi/health')) {
-      return { ok: true, status: 200, json: async () => ({ ok: true, binary: { found: true, path: '/usr/local/bin/shangyi' }, mcpTools: { status: 'ok', count: 38 }, problems: [] }) }
+      return { ok: true, status: 200, json: async () => ({ ok: true, binary: { found: true, path: '/usr/local/bin/shangyi' }, mcpTools: { status: 'ok', count: 39 }, problems: [] }) }
     }
     return { ok: false, status: 404, json: async () => ({ ok: false, error: 'unknown ' + u }) }
   }
@@ -802,6 +802,10 @@ check('M2 #5: Markdown 纯 React 渲染剥离 frontmatter、防 XSS 并支持 [[
     conclusion: { headline: '维持原价优先', recommend: { actions: [{ action: '推出会员储值', rationale: '提升留存' }], do_not: ['全线降价'] } }
   })))
   assert.ok(repMd.includes('探索性工具隔离声明') && repMd.includes('维持原价优先') && repMd.includes('推出会员储值'))
+  assert.deepEqual(
+    Object.keys(SYData.COST_TREATMENT_LABELS).sort(),
+    ['cash_expense', 'noncash_expense', 'opportunity_cost', 'refundable_deposit', 'unknown']
+  )
 })
 
 check('M2 #7: /api/shangyi/health 异常时在工作台顶部渲染阻断告警与修复命令', () => {

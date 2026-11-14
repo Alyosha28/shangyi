@@ -99,19 +99,20 @@ fn resume_requires_case_id() {
 }
 
 #[test]
-fn report_defaults_to_pdf() {
+fn report_defaults_to_md() {
     let c = parse(&args(&["report", "case-1"])).unwrap();
     assert_eq!(
         c,
         Command::Report {
             case: "case-1".into(),
-            format: ReportFormat::Pdf
+            format: ReportFormat::Md,
+            output: None,
         }
     );
 }
 
 #[test]
-fn report_parses_all_formats() {
+fn report_parses_all_formats_and_output_flags() {
     for (s, want) in [
         ("md", ReportFormat::Md),
         ("docx", ReportFormat::Docx),
@@ -119,18 +120,47 @@ fn report_parses_all_formats() {
     ] {
         let c = parse(&args(&["report", "c", "--format", s])).unwrap();
         match c {
-            Command::Report { format, .. } => assert_eq!(format, want, "{s}"),
+            Command::Report { format, output, .. } => {
+                assert_eq!(format, want, "{s}");
+                assert_eq!(output, None);
+            }
             other => panic!("实得 {other:?}"),
         }
     }
+
+    let c1 = parse(&args(&["report", "case-1", "--output", "out/r.md"])).unwrap();
+    assert_eq!(
+        c1,
+        Command::Report {
+            case: "case-1".into(),
+            format: ReportFormat::Md,
+            output: Some("out/r.md".into()),
+        }
+    );
+
+    let c2 = parse(&args(&["report", "-f", "pdf", "-o", "/tmp/r.pdf", "case-2"])).unwrap();
+    assert_eq!(
+        c2,
+        Command::Report {
+            case: "case-2".into(),
+            format: ReportFormat::Pdf,
+            output: Some("/tmp/r.pdf".into()),
+        }
+    );
 }
 
 #[test]
-fn report_rejects_unknown_format() {
+fn report_rejects_unknown_format_and_empty_output() {
     let err = parse(&args(&["report", "c", "--format", "html"])).expect_err("未知格式必须被拒");
     assert!(
         matches!(err, CliError::InvalidValue { ref value, .. } if value == "html"),
         "实得 {err:?}"
+    );
+    let err_empty =
+        parse(&args(&["report", "c", "--output", "   "])).expect_err("空 --output 必须被拒");
+    assert!(
+        matches!(err_empty, CliError::InvalidValue { .. }),
+        "实得 {err_empty:?}"
     );
 }
 
@@ -236,11 +266,22 @@ fn unknown_command_rejected() {
 #[test]
 fn empty_args_rejected_with_hint() {
     let err = parse(&args(&[])).expect_err("无命令必须被拒");
-    // 错误信息应给出可用命令（否则用户不知下一步）
-    assert!(
-        format!("{err}").contains("new"),
-        "错误信息应提示可用命令：{err}"
-    );
+    let msg = format!("{err}");
+    // 错误信息应完整列出全部 9 个可用子命令
+    for cmd in [
+        "start",
+        "ui",
+        "new",
+        "resume",
+        "solve",
+        "report",
+        "backtest",
+        "kb",
+        "checkpoint",
+        "mcp-serve",
+    ] {
+        assert!(msg.contains(cmd), "空参数提示缺少 `{cmd}`：{msg}");
+    }
 }
 
 #[test]
@@ -263,6 +304,14 @@ fn missing_option_value_rejected() {
     ));
     assert!(matches!(
         parse(&args(&["report", "c", "--format"])),
+        Err(CliError::MissingArg { .. })
+    ));
+    assert!(matches!(
+        parse(&args(&["report", "c", "--output"])),
+        Err(CliError::MissingArg { .. })
+    ));
+    assert!(matches!(
+        parse(&args(&["report", "c", "-o"])),
         Err(CliError::MissingArg { .. })
     ));
 }
@@ -469,14 +518,28 @@ fn self_check_skips_when_no_playbook_given() {
 #[test]
 fn help_lists_all_commands_and_modes() {
     let h = help();
-    for cmd in ["new", "resume", "report", "backtest", "kb"] {
+    for cmd in [
+        "start",
+        "ui",
+        "new",
+        "resume",
+        "report",
+        "kb",
+        "backtest",
+        "solve",
+        "checkpoint",
+        "mcp-serve",
+    ] {
         assert!(h.contains(cmd), "帮助应含命令 `{cmd}`：{h}");
     }
     for m in ["scenario", "whatif", "discover"] {
         assert!(h.contains(m), "帮助应含模式 `{m}`");
     }
-    // 关键提示：whatif 必须给 action（用户在 help 里就该知道）
+    // 关键提示：whatif 必须给 action，report 说明默认 md + --output + pandoc
     assert!(h.contains("--action"), "帮助应说明 whatif 需要 --action");
+    assert!(h.contains("--output"), "帮助应说明 report 支持 --output");
+    assert!(h.contains("默认 md"), "帮助应说明 report 默认 md");
+    assert!(h.contains("pandoc"), "帮助应说明 pdf/docx 按需调用 pandoc");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -579,4 +642,144 @@ fn help_mentions_solve() {
     assert!(h.contains("solve"), "帮助应含 solve：{h}");
     // 机器接口的定位说明（调用方据此判断 stdout 可否直接管道给 JSON 解析器）
     assert!(h.contains("离线机器接口"), "帮助应说明 solve 是离线机器接口");
+}
+
+#[test]
+fn start_and_ui_alias_parse_correctly() {
+    let s1 = parse(&args(&["start"])).unwrap();
+    assert_eq!(
+        s1,
+        Command::Start {
+            port: None,
+            no_open: false,
+        }
+    );
+    assert!(s1.is_mutating());
+    assert!(s1.phases().is_empty());
+
+    let s2 = parse(&args(&["ui", "--port", "9001", "--no-open"])).unwrap();
+    assert_eq!(
+        s2,
+        Command::Start {
+            port: Some(9001),
+            no_open: true,
+        }
+    );
+
+    assert!(matches!(
+        parse(&args(&["start", "--port", "0"])),
+        Err(CliError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse(&args(&["start", "--port"])),
+        Err(CliError::MissingArg { .. })
+    ));
+    assert!(matches!(
+        parse(&args(&["start", "--unknown"])),
+        Err(CliError::UnknownOption { .. })
+    ));
+}
+
+#[test]
+fn checkpoint_parses_approve_reject_and_options() {
+    let c1 = parse(&args(&[
+        "checkpoint",
+        "latest",
+        "--approve",
+        "--note",
+        "确认假设",
+        "--home",
+        "/tmp/sh",
+    ]))
+    .unwrap();
+    assert_eq!(
+        c1,
+        Command::Checkpoint {
+            case: "latest".into(),
+            approve: true,
+            note: Some("确认假设".into()),
+            home: Some("/tmp/sh".into()),
+        }
+    );
+    assert!(c1.is_mutating());
+    assert!(c1.phases().is_empty());
+
+    let c2 = parse(&args(&["checkpoint", "case-9", "--reject"])).unwrap();
+    assert_eq!(
+        c2,
+        Command::Checkpoint {
+            case: "case-9".into(),
+            approve: false,
+            note: None,
+            home: None,
+        }
+    );
+
+    assert!(matches!(
+        parse(&args(&["checkpoint", "latest"])),
+        Err(CliError::MissingArg { .. })
+    ));
+    assert!(matches!(
+        parse(&args(&["checkpoint", "--approve"])),
+        Err(CliError::MissingArg { .. })
+    ));
+    assert!(matches!(
+        parse(&args(&["checkpoint", "latest", "--approve", "--reject"])),
+        Err(CliError::InvalidValue { .. })
+    ));
+}
+
+#[test]
+fn mcp_serve_parses_options_and_contracts() {
+    let m1 = parse(&args(&["mcp-serve"])).unwrap();
+    assert_eq!(
+        m1,
+        Command::McpServe {
+            playbook: None,
+            mode: None,
+            home: None,
+            auto_approve_checkpoints: false,
+            resume: None,
+        }
+    );
+    assert!(m1.is_mutating());
+    assert_eq!(m1.phases(), Mode::Scenario.phases());
+
+    let m2 = parse(&args(&[
+        "mcp-serve",
+        "--playbook",
+        "pricing_response",
+        "--mode",
+        "discover",
+        "--home",
+        "/tmp/h",
+        "--auto-approve-checkpoints",
+        "--resume",
+        "latest",
+    ]))
+    .unwrap();
+    assert_eq!(
+        m2,
+        Command::McpServe {
+            playbook: Some("pricing_response".into()),
+            mode: Some(Mode::Discover),
+            home: Some("/tmp/h".into()),
+            auto_approve_checkpoints: true,
+            resume: Some("latest".into()),
+        }
+    );
+    assert_eq!(m2.phases(), Mode::Discover.phases());
+
+    assert!(matches!(
+        parse(&args(&["mcp-serve", "--mode", "bad"])),
+        Err(CliError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        parse(&args(&["mcp-serve", "--home"])),
+        Err(CliError::MissingArg { .. })
+    ));
+    assert!(matches!(
+        parse(&args(&["mcp-serve", "--foo"])),
+        Err(CliError::UnknownOption { .. })
+    ));
 }

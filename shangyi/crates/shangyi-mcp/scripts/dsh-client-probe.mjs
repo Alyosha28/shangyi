@@ -25,7 +25,7 @@
 //
 // 断言（任一失败即非零退出）：
 // 1. initialize 成功，protocolVersion 为 2025-11-25
-// 2. tools/list 返回 38 个工具，且 solve_equilibria 的 inputSchema 被 SDK 接受
+// 2. tools/list 返回 39 个工具，且 solve_equilibria 的 inputSchema 被 SDK 接受
 // 3. 未选范围时调 solve_equilibria → 工具级 isError=true（RPC 层不抛异常）
 // 4. 完整链路（auto-approve）走到 solve，solve_equilibria 返回可解析的均衡 JSON
 // 5. 阶段闸门的拒绝理由真的出现在工具结果里
@@ -62,8 +62,8 @@ const caps = client.getServerCapabilities?.() ?? {};
 check(Boolean(caps.tools), "capabilities.tools", JSON.stringify(caps));
 
 const { tools } = await client.listTools();
-// 38 = `ToolRegistry::standard()` 的 spec 数（从源码数；任务描述里的 41 是陈旧数字）
-check(tools.length === 38, "tools/list 数量", `${tools.length}`);
+// 39 = `ToolRegistry::standard()` 的 spec 数（含 `begin_followup_task`）
+check(tools.length === 39, "tools/list 数量", `${tools.length}`);
 
 const solveTool = tools.find((t) => t.name === "solve_equilibria");
 check(Boolean(solveTool), "solve_equilibria 在清单里");

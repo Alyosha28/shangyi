@@ -256,43 +256,19 @@ pub fn tool_schema(name: &str) -> Option<serde_json::Value> {
                 "participant_id": {"type": "string"},
                 "behavior_models": {
                     "type": "array",
-                    "description": "（可选）类型推断的**似然模型**——各类型对各类行为的相对倾向。\
-                        给了它就（连同 type_priors）做贝叶斯后验更新；不给则如实标注「未推断」。\
-                        引擎**不替你造它**（那是领域判断，属铁律 1 禁止的编数）。",
-                    "items": {
-                        "type": "object",
-                        "required": ["type_name"],
-                        "additionalProperties": false,
-                        "properties": {
-                            "type_name": {"type": "string", "description": "如「清库存型」「长期战略型」"},
-                            "event_weights": {
-                                "type": "object",
-                                "description": "事件类型 → 倾向权重（越大越可能做出该类行为）",
-                                "additionalProperties": {"type": "number"}
-                            },
-                            "magnitude_sensitivity": {"type": "number", "default": 1.0}
-                        }
-                    }
-                },
-                "type_priors": {
-                    "type": "object",
-                    "description": "（可选）各类型的**先验概率，必须归一化**（和为 1）。\
-                        每个有先验的类型都要有对应的 behavior_model。",
-                    "additionalProperties": {"type": "number"}
-                },
-                "behavior_models": {
-                    "type": "array",
-                    "description": "（可选）各「对手类型」的行为倾向——**做贝叶斯推断必需**。                        与 `type_priors` 同时给出才会推断。每类型对各类事件的权重越大，\
-                        说明该类型越可能做出那类行为（那是**领域判断**，须有依据）。",
+                    "description": "（可选）各「对手类型」的似然模型/行为倾向——**做贝叶斯推断必需**。\
+                        给了它就（连同 `type_priors`）做贝叶斯后验更新；不给则如实标注「未推断」。\
+                        每类型对各类事件的权重越大，说明该类型越可能做出那类行为（那是**领域判断**，\
+                        须有依据；引擎不替你编造，属铁律 1 禁止）。",
                     "items": {
                         "type": "object",
                         "required": ["type_name", "event_weights"],
                         "additionalProperties": false,
                         "properties": {
-                            "type_name": {"type": "string", "description": "如「清库存型」"},
+                            "type_name": {"type": "string", "description": "如「清库存型」「长期战略型」"},
                             "event_weights": {
                                 "type": "object",
-                                "description": "事件类型 → 倾向权重（键用 event_type 的取值）",
+                                "description": "事件类型 → 倾向权重（键用 `event_type` 的取值，越大越可能做出该类行为）",
                                 "additionalProperties": {"type": "number", "minimum": 0}
                             },
                             "magnitude_sensitivity": {"type": "number", "default": 1.0}
@@ -301,7 +277,8 @@ pub fn tool_schema(name: &str) -> Option<serde_json::Value> {
                 },
                 "type_priors": {
                     "type": "object",
-                    "description": "（可选）各类型的先验概率，**必须归一化**（和为 1）。                        与 `behavior_models` 同时给出才会推断。",
+                    "description": "（可选）各类型的先验概率，**必须归一化**（和为 1）。\
+                        与 `behavior_models` 同时给出才会推断，且每个有先验的类型都要有对应的 `behavior_model`。",
                     "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}
                 },
                 "value_net_role": {
@@ -390,9 +367,10 @@ pub fn tool_schema(name: &str) -> Option<serde_json::Value> {
                 "merge": {
                     "type": "boolean",
                     "description": "增量构建：把本次输入**深合并**进会话内已有的 GameSpec\
-                                    （对象逐层合并、数组整体替换）。适合「先搭骨架、\
-                                    再补参数」的两步写法——长嵌套 JSON 一次写对的\
-                                    概率随长度下降，分两次写更稳。默认 false（整体替换）。"
+                                    （对象逐层合并、数组整体替换）。适合「先搭最小可校验骨架、\
+                                    再增量补 params/ref」的两步写法——首次建立时 `payoffs.values.cells`\
+                                    不能为空对象 `{}`（可先用最小字面量 cells + 空 `params: {}`），\
+                                    再用 `merge: true` 补充参数与引用。默认 false（整体替换）。"
                 },
                 "game_id": {"type": "string"},
                 "constraint_revision":{"type":"integer","minimum":0,"description":"有真实用户硬上限时，使用constraint_check返回的当前版本；旧版本不能进入求解。"},
@@ -1048,5 +1026,77 @@ mod tests {
     fn unknown_tool_has_no_schema() {
         assert!(tool_schema("sandbox_exec").is_none());
         assert!(tool_schema("不存在的工具").is_none());
+    }
+
+    /// 防止 `json!({...})` 字面量内出现重复对象键（如 `participant_profile_update` 曾重复声明
+    /// `behavior_models` 与 `type_priors`，`serde_json::json!` 在运行时静默覆盖，导致严格校验器拒收）。
+    #[test]
+    fn schema_source_has_no_duplicate_object_keys_in_json_literals() {
+        let src = include_str!("schema.rs");
+        let code = src.split("#[cfg(test)]").next().expect("schema module should have #[cfg(test)]");
+        let bytes = code.as_bytes();
+        let n = bytes.len();
+        let mut i = 0usize;
+        let mut scope_stack: Vec<(bool, std::collections::BTreeSet<String>)> = Vec::new();
+        let mut duplicates: Vec<String> = Vec::new();
+
+        while i < n {
+            let b = bytes[i];
+            if b == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
+                while i < n && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if b == b'"' {
+                let start = i + 1;
+                i += 1;
+                let mut lit = String::new();
+                while i < n {
+                    if bytes[i] == b'\\' && i + 1 < n {
+                        let next = bytes[i + 1];
+                        lit.push('\\');
+                        lit.push(next as char);
+                        i += 2;
+                    } else if bytes[i] == b'"' {
+                        i += 1;
+                        break;
+                    } else {
+                        let ch = code[i..].chars().next().unwrap();
+                        lit.push(ch);
+                        i += ch.len_utf8();
+                    }
+                }
+                let mut j = i;
+                while j < n && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {
+                    j += 1;
+                }
+                if j < n && bytes[j] == b':' && (j + 1 >= n || bytes[j + 1] != b':') {
+                    if let Some((in_json, keys)) = scope_stack.last_mut() {
+                        if *in_json && !keys.insert(lit.clone()) {
+                            let line = code[..start].bytes().filter(|c| *c == b'\n').count() + 1;
+                            duplicates.push(format!("line {line}: duplicate key \"{lit}\""));
+                        }
+                    }
+                }
+                continue;
+            }
+            if code[i..].starts_with("json!({") {
+                scope_stack.push((true, std::collections::BTreeSet::new()));
+                i += "json!({".len();
+                continue;
+            }
+            if b == b'{' {
+                let in_json = scope_stack.last().is_some_and(|(flag, _)| *flag);
+                scope_stack.push((in_json, std::collections::BTreeSet::new()));
+            } else if b == b'}' {
+                scope_stack.pop();
+            }
+            i += 1;
+        }
+        assert!(
+            duplicates.is_empty(),
+            "schema.rs 存在重复 JSON 对象键: {duplicates:?}"
+        );
     }
 }

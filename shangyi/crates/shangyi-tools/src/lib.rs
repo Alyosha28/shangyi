@@ -20,7 +20,7 @@
 //!
 //! ## 3. 可信度分类（铁律 1）
 //!
-//! 工具结果分三类，**报告生成器按类过滤**：
+//! 工具结果分四类，**报告生成器按类过滤**：
 //!
 //! | 类 | 来源 | 可否进报告 |
 //! |---|---|---|
@@ -32,6 +32,9 @@
 //! 最后一类对应 Harness §9.3 对 `sandbox_exec` 的收窄（R8）：
 //! 其产出标注 `exploratory: true`，报告生成器拒绝读取。
 
+
+/// [`ToolRegistry::standard`] 暴露的标准领域工具总数。
+pub const STANDARD_TOOL_COUNT: usize = 39;
 
 pub mod schema;
 
@@ -226,9 +229,6 @@ impl ToolRegistry {
             ("sensitivity_scan", "翻转阈值扫描", "shangyi-selection", TrustLevel::Engine, true, &["recommend"]),
             ("discover_satisfice", "满意策略发现", "shangyi-discover", TrustLevel::Engine, true, &["discover"]),
             ("preference_inject", "偏好注入", "shangyi-core", TrustLevel::Engine, true, &["recommend"]),
-            // §7.3 的阶段表列了它，但**从未注册**——于是 recommend 阶段
-            // 永远产不出 `RecommendationPack`，report 阶段在结构上不可达。
-            // 实测：三次端到端都停在 recommend（见 iter27）。
             ("recommend_build", "汇总建议包（recommend 阶段产物）", "shangyi-core", TrustLevel::Engine, true, &["recommend"]),
             ("report_render", "报告渲染（产出 ReportModel → 侧车）", "shangyi-report", TrustLevel::Engine, false, &["report"]),
             ("case_store_read", "案例库读取", "shangyi-kb", TrustLevel::Engine, true, &[]),
@@ -333,7 +333,7 @@ impl ToolRegistry {
 //
 // # 为什么需要这个工具（实测暴露）
 //
-// 设计文档规定回退的触发者是**用户**（§7.5：`shangyi resume --reopen cp2`），
+// 阶段回退的触发者是**用户**（通过确认关口或用户显式发起的回退审批），
 // 不是模型。实测里模型正确地**拒绝**了自行回退——但它没有任何工具能表达
 // "我需要回退"这个判断，于是它只能停在 recommend 阶段把话说完，**不再前进**。
 //

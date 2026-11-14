@@ -55,8 +55,8 @@ for required in package.json cordis.patch.yml pnpm-workspace.yaml cordis.yml len
   [ -f "$SRC_DIR/$required" ] || fail "profile 源缺文件：$SRC_DIR/$required"
 done
 
-# 商奕二进制自检：SHANGYI_BIN 优先（profile 里的 command 就是这么解析的），
-# 否则看 PATH。两处都没有 → 这个部署拿不到任何领域工具。
+# 商奕二进制自检：SHANGYI_BIN 优先，否则依次看 PATH 与 ~/.shangyi/bin/shangyi。
+# 三处都没有 → 这个部署拿不到任何领域工具。
 SERVER_KIND=""
 SERVER_PATH=""
 if [ -n "${SHANGYI_BIN:-}" ]; then
@@ -70,6 +70,9 @@ if [ -n "${SHANGYI_BIN:-}" ]; then
 elif command -v shangyi >/dev/null 2>&1; then
   SERVER_KIND="PATH"
   SERVER_PATH="$(command -v shangyi)"
+elif [ -x "${HOME}/.shangyi/bin/shangyi" ]; then
+  SERVER_KIND="USER_BIN"
+  SERVER_PATH="${HOME}/.shangyi/bin/shangyi"
 else
   SERVER_KIND="MISSING"
 fi
@@ -86,8 +89,9 @@ echo "  DSH_HOME：$DSH_HOME_DIR"
 case "$SERVER_KIND" in
   SHANGYI_BIN)     echo "  商奕二进制：$SERVER_PATH（来自 SHANGYI_BIN）" ;;
   PATH)            echo "  商奕二进制：$SERVER_PATH（来自 PATH）" ;;
+  USER_BIN)        echo "  商奕二进制：$SERVER_PATH（来自 ~/.shangyi/bin）" ;;
   SHANGYI_BIN_BAD) echo "  商奕二进制：SHANGYI_BIN=$SERVER_PATH 不是可执行文件" ;;
-  MISSING)         echo "  商奕二进制：未找到（SHANGYI_BIN 未设，PATH 上也没有 shangyi）" ;;
+  MISSING)         echo "  商奕二进制：未找到（SHANGYI_BIN 未设，PATH 与 ~/.shangyi/bin 上也没有可执行 shangyi）" ;;
 esac
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -115,10 +119,10 @@ echo
 echo "下一步："
 echo "  1) 离线核对合成树（不激活插件，不需要二进制、不需要模型凭据）："
 echo "       DSH_HOME=\"$DSH_HOME_DIR\" dsh --profile $PROFILE_NAME --dump-config | grep -A9 'mcp-shangyi'"
-echo "  2) 放好商奕二进制（R2 才实现 mcp-serve 子命令）："
-echo "       export SHANGYI_BIN=/abs/path/to/shangyi   # 不设则用 PATH 上的 shangyi"
-echo "  3) 配模型凭据并跑一轮（真实模型 E2E，余额未核）："
-echo "       export DEEPSEEK_API_KEY=..."
+echo "  2) 放好商奕二进制（含 mcp-serve 与 start 子命令）："
+echo "       export SHANGYI_BIN=/abs/path/to/shangyi   # 不设则用 PATH 或 ~/.shangyi/bin/shangyi"
+echo "  3) 配模型凭据并跑一轮（真实模型 E2E）："
+echo "       export MAGPIE_GATEWAY_KEY=...   # 或 DEEPSEEK_API_KEY=..."
 echo "       DSH_HOME=\"$DSH_HOME_DIR\" dsh --profile $PROFILE_NAME --json \"用囚徒困境给个例子\""
 echo "  4) 没有二进制的机器只想看配置树（放弃领域工具，回到静默降级）："
 echo "       dsh --profile $PROFILE_NAME --patch \"$DEST_DIR/lenient.patch.yml\" \"...\""
@@ -136,12 +140,12 @@ if [ "$SERVER_KIND" = "MISSING" ] || [ "$SERVER_KIND" = "SHANGYI_BIN_BAD" ]; the
   if [ "$SERVER_KIND" = "SHANGYI_BIN_BAD" ]; then
     echo "install-profile.sh: SHANGYI_BIN=$SERVER_PATH 不是可执行文件。" >&2
   else
-    echo "install-profile.sh: 找不到商奕二进制（SHANGYI_BIN 未设，PATH 上也没有 shangyi）。" >&2
+    echo "install-profile.sh: 找不到商奕二进制（SHANGYI_BIN 未设，PATH 与 ~/.shangyi/bin 上也没有可执行 shangyi）。" >&2
   fi
   echo "  后果：模型看不到任何领域工具（mcp__shangyi__* 一个都没有）；" >&2
   echo "        每次真实运行 stderr 会打印 \"spawn shangyi ENOENT\" 且 dsh 仍继续跑，" >&2
   echo "        于是模型对每个问题只能回\"未取得\"——看起来像引擎没数据，实际是工具没挂上。" >&2
-  echo "  解决：export SHANGYI_BIN=/abs/path/to/shangyi 后重跑本脚本；" >&2
+  echo "  解决：export SHANGYI_BIN=/abs/path/to/shangyi（或安装到 ~/.shangyi/bin/shangyi）后重跑本脚本；" >&2
   echo "        或确实只要配置树（CI/评审机）：加 --allow-missing-server。" >&2
   if [ "$ALLOW_MISSING_SERVER" -eq 1 ]; then
     echo "  （已按 --allow-missing-server 降级为告警，退出码 0。）" >&2
@@ -150,9 +154,9 @@ if [ "$SERVER_KIND" = "MISSING" ] || [ "$SERVER_KIND" = "SHANGYI_BIN_BAD" ]; the
   fi
 fi
 
-if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+if [ -z "${DEEPSEEK_API_KEY:-}" ] && [ -z "${MAGPIE_GATEWAY_KEY:-}" ]; then
   echo >&2
-  echo "提示：当前 shell 没有 DEEPSEEK_API_KEY，真实运行会以 MISSING_CREDENTIAL 失败。" >&2
+  echo "提示：当前 shell 没有 DEEPSEEK_API_KEY 或 MAGPIE_GATEWAY_KEY，真实运行会以 MISSING_CREDENTIAL 失败。" >&2
 fi
 
 exit "$STATUS"

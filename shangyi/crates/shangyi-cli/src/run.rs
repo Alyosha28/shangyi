@@ -356,19 +356,6 @@ pub fn start_consultation(
     // now runs when select_task_scope chooses consultation; a research-only
     // request does not require a game solver in its playbook.
 
-    let dir = case_dir(&case_id, &created_at)?;
-    let header = CaseHeader {
-        case_id: case_id.clone(),
-        mode: mode.as_str().to_string(),
-        playbook_id: playbook.meta.id.clone(),
-        created_at: created_at.clone(),
-        schema_version: CaseHeader::SCHEMA_VERSION,
-    };
-    let log = CaseLog::open(&dir, &header).map_err(|e| RunFailure::CaseDir {
-        path: dir.display().to_string(),
-        detail: e.to_string(),
-    })?;
-
     // ── LLM 端点与凭据：缺失即**拒绝启动**，不退回模拟 ──
     //
     // 供应商选择（`SHANGYI_PROVIDER`）：
@@ -444,6 +431,20 @@ pub fn start_consultation(
     if let Err(e) = preflight(&client, &model, &registry) {
         return Err(e);
     }
+
+    let dir = case_dir(&case_id, &created_at)?;
+    let header = CaseHeader {
+        case_id: case_id.clone(),
+        mode: mode.as_str().to_string(),
+        playbook_id: playbook.meta.id.clone(),
+        created_at: created_at.clone(),
+        schema_version: CaseHeader::SCHEMA_VERSION,
+    };
+    let log = CaseLog::open(&dir, &header).map_err(|e| RunFailure::CaseDir {
+        path: dir.display().to_string(),
+        detail: e.to_string(),
+    })?;
+
     let theory = TheoryLibrary::new();
     // 加载知识库（R22 的 LLM-Wiki：页 + 链接图）
     let wiki = load_wiki(&theory);
@@ -612,7 +613,7 @@ pub fn start_consultation(
             .map_err(|e| RunFailure::Session(e.to_string()))?
     };
 
-    print_report(&report, runner.machine());
+    print_report(&report, runner.machine(), &case_id);
     Ok(())
 }
 
@@ -872,101 +873,125 @@ fn load_playbook(id: Option<&str>) -> Result<Playbook, RunFailure> {
     )))
 }
 
-/// 打印运行结局。
-///
-/// **不把非完成说成完成**：挂起/阻塞/失败各自有明确措辞与"下一步"。
-fn print_report(report: &RunReport, machine: &PhaseMachine) {
-    println!();
-    println!("─── 现在啥情况 ───");
+fn format_report_lines(report: &RunReport, machine: &PhaseMachine, case_id: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(String::new());
+    lines.push("─── 现在啥情况 ───".to_string());
     let p = progress(machine);
-    println!("哪一步：{}（{}）", p.phase.as_str(), phase_label(p.phase));
-    println!("产出了：{}", if p.missing_artifacts.is_empty() {
-        "齐备".to_string()
-    } else {
-        format!(
-            "缺 {}",
-            p.missing_artifacts
-                .iter()
-                .map(|k| k.key())
-                .collect::<Vec<_>>()
-                .join("、")
-        )
-    });
+    lines.push(format!("哪一步：{}（{}）", p.phase.as_str(), phase_label(p.phase)));
+    lines.push(format!(
+        "产出了：{}",
+        if p.missing_artifacts.is_empty() {
+            "齐备".to_string()
+        } else {
+            format!(
+                "缺 {}",
+                p.missing_artifacts
+                    .iter()
+                    .map(|k| k.key())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            )
+        }
+    ));
     if let Some(cp) = p.pending_checkpoint {
-        println!("核对点：{} — {}", cp.as_str(), p.checkpoint_state);
+        lines.push(format!("核对点：{} — {}", cp.as_str(), p.checkpoint_state));
     }
-    println!("为啥往前走：{}", p.reason);
+    lines.push(format!("为啥往前走：{}", p.reason));
 
-    println!();
+    lines.push(String::new());
     match report {
-        RunReport::TaskCompleted {result,..} => {
-            println!("✓ 这次的{}交了（{} 轮，{}）。",result.scope.as_str(),report.turns(),
-                if result.is_complete(){"要的资料和钱都齐了"}else{"还有资料或金额没到手"});
-            println!("只对这次要求的范围；不代表完整咨询做完了。");
+        RunReport::TaskCompleted { result, .. } => {
+            lines.push(format!(
+                "✓ 这次的{}交了（{} 轮，{}）。",
+                result.scope.as_str(),
+                report.turns(),
+                if result.is_complete() {
+                    "要的资料和钱都齐了"
+                } else {
+                    "还有资料或金额没到手"
+                }
+            ));
+            lines.push("只对这次要求的范围；不代表完整咨询做完了。".to_string());
         }
         RunReport::Completed { .. } => {
-            println!("✓ 全聊完了（{} 轮）。", report.turns());
+            lines.push(format!("✓ 全聊完了（{} 轮）。", report.turns()));
         }
         RunReport::AwaitingUser { checkpoint, .. } => {
-            println!(
+            lines.push(format!(
                 "⏸ 停着等你核对 {}（{} 轮）。",
                 checkpoint.as_str(),
                 report.turns()
-            );
-            println!("   用 `shangyi resume {}` 继续。", machine.mode().as_str());
+            ));
+            lines.push(format!("   用 `shangyi resume {case_id}` 继续。"));
         }
         RunReport::AwaitingAnswers { .. } => {
-            println!("⏸ 停着等你补充（{} 轮）。", report.turns());
-            println!("   没答的记「没问到」——不猜、不编。");
-            println!("   用 `shangyi resume {}` 继续。", machine.mode().as_str());
+            lines.push(format!("⏸ 停着等你补充（{} 轮）。", report.turns()));
+            lines.push("   没答的记「没问到」——不猜、不编。".to_string());
+            lines.push(format!("   用 `shangyi resume {case_id}` 继续。"));
         }
         RunReport::Blocked { detail, .. } => {
-            println!("⛔ 外部东西用不了，先停了（{} 轮）。", report.turns());
-            println!("   原因：{detail}");
-            println!("   这不是结论——查不到的记「没查到」，不当成「没有」。");
-            println!("   等能用了，`shangyi resume` 接着来。");
+            lines.push(format!("⛔ 外部东西用不了，先停了（{} 轮）。", report.turns()));
+            lines.push(format!("   原因：{detail}"));
+            lines.push("   这不是结论——查不到的记「没查到」，不当成「没有」。".to_string());
+            lines.push(format!("   等能用了，`shangyi resume {case_id}` 接着来。"));
         }
         RunReport::Failed { detail, .. } => {
-            println!("✗ 这轮没成（{} 轮）。", report.turns());
-            println!("   {detail}");
+            lines.push(format!("✗ 这轮没成（{} 轮）。", report.turns()));
+            lines.push(format!("   {detail}"));
         }
         RunReport::Aborted { .. } => {
-            println!("■ 被叫停了（{} 轮）。做完的还在日志里。", report.turns());
+            lines.push(format!(
+                "■ 被叫停了（{} 轮）。做完的还在日志里。",
+                report.turns()
+            ));
         }
-        RunReport::StageBudgetExhausted { phase, turns_in_stage, .. } => {
-            println!(
+        RunReport::StageBudgetExhausted {
+            phase,
+            turns_in_stage,
+            ..
+        } => {
+            lines.push(format!(
                 "⚠ 在“{}”这一步用满了 {} 轮，还没往前走。",
                 phase.as_str(),
                 turns_in_stage
-            );
-            println!("   不算失败——是「不再连环问」。");
-            println!("   补点信息，`shangyi resume` 接着来（重新计数）。");
+            ));
+            lines.push("   不算失败——是「不再连环问」。".to_string());
+            lines.push(format!(
+                "   补点信息，`shangyi resume {case_id}` 接着来（重新计数）。"
+            ));
         }
         RunReport::BudgetExhausted { .. } => {
-            println!("⚠ 到轮数上限了，还没往前走（{} 轮）。", report.turns());
-            println!("   多半是该产出的没产出。日志在，能查。");
+            lines.push(format!(
+                "⚠ 到轮数上限了，还没往前走（{} 轮）。",
+                report.turns()
+            ));
+            lines.push("   多半是该产出的没产出。日志在，能查。".to_string());
         }
+    }
+    lines
+}
+
+/// 打印运行结局。
+///
+/// **不把非完成说成完成**：挂起/阻塞/失败各自有明确措辞与"下一步"。
+fn print_report(report: &RunReport, machine: &PhaseMachine, case_id: &str) {
+    for line in format_report_lines(report, machine, case_id) {
+        println!("{line}");
     }
 }
 
 /// 恢复一次会话（读日志 + 崩溃修复 + 打印状态）。
 pub fn resume_consultation(case: &str) -> Result<(), RunFailure> {
+    let trimmed = case.trim();
+    if trimmed.is_empty() {
+        return Err(RunFailure::Session("案例标识不能为空".into()));
+    }
     let home = shangyi_home()?;
     let cases = home.join("cases");
-    // 在日期分片下找该 case_id（找不到就报错，不猜）
-    let mut found: Option<PathBuf> = None;
-    if let Ok(days) = std::fs::read_dir(&cases) {
-        for d in days.flatten() {
-            let cand = d.path().join(case);
-            if cand.join("case.jsonl").exists() || cand.join("header.json").exists() {
-                found = Some(cand);
-                break;
-            }
-        }
-    }
-    let dir = found.ok_or_else(|| RunFailure::CaseDir {
+    let dir = find_case_dir_in(&cases, trimmed).ok_or_else(|| RunFailure::CaseDir {
         path: cases.display().to_string(),
-        detail: format!("找不到案例 `{case}` 的目录"),
+        detail: format!("找不到案例 `{trimmed}` 的目录（支持案例 ID 或 `latest`）"),
     })?;
 
     let outcome = shangyi_core::case_log::resume(&dir).map_err(|e| RunFailure::CaseDir {
@@ -974,7 +999,18 @@ pub fn resume_consultation(case: &str) -> Result<(), RunFailure> {
         detail: e.to_string(),
     })?;
 
-    println!("商奕：接着聊 {case}");
+    let resolved_id = std::fs::read_to_string(dir.join("header.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<CaseHeader>(&s).ok())
+        .map(|h| h.case_id)
+        .or_else(|| {
+            dir.file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| trimmed.to_string());
+
+    println!("商奕：接着聊 {resolved_id}");
     println!("       目录 = {}", dir.display());
     println!("       事件 = {} 条", outcome.events.len());
     if outcome.crashed() {
@@ -1109,6 +1145,69 @@ mod tests {
             Err(e) => panic!("期望 Playbook 错误，实得 {e:?}"),
             Ok(_) => panic!("不得为不存在的剧本构造占位"),
         }
+    }
+
+    #[test]
+    fn print_report_hints_actual_case_id_instead_of_mode() {
+        let machine = PhaseMachine::new(ConsultationMode::Scenario);
+        let case_id = "case-20261114-scenario-123456";
+        for rep in [
+            RunReport::AwaitingUser {
+                phase: SessionPhase::ModelBuild,
+                checkpoint: CheckpointId::Cp2,
+                turns: 2,
+            },
+            RunReport::AwaitingAnswers {
+                phase: SessionPhase::Intake,
+                turns: 1,
+            },
+            RunReport::Blocked {
+                phase: SessionPhase::Intel,
+                detail: "无搜索密钥".into(),
+                turns: 1,
+            },
+            RunReport::StageBudgetExhausted {
+                phase: SessionPhase::Intake,
+                turns_in_stage: 4,
+                turns: 4,
+            },
+        ] {
+            let joined = format_report_lines(&rep, &machine, case_id).join("\n");
+            assert!(
+                joined.contains(&format!("shangyi resume {case_id}")),
+                "应提示具体 case_id：{joined}"
+            );
+            assert!(
+                !joined.contains("`shangyi resume scenario`"),
+                "不得把 mode 当成 case_id：{joined}"
+            );
+        }
+    }
+
+    #[test]
+    fn find_case_dir_in_resolves_latest_deterministically() {
+        let root = std::env::temp_dir().join(format!(
+            "shangyi-cli-latest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let c1 = root.join("2026-11-14/case-20261114-scenario-010000");
+        let c2 = root.join("2026-11-14/case-20261114-scenario-020000");
+        std::fs::create_dir_all(&c1).unwrap();
+        std::fs::create_dir_all(&c2).unwrap();
+        std::fs::write(c1.join("case.jsonl"), "{}\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(c2.join("case.jsonl"), "{}\n").unwrap();
+
+        assert_eq!(find_case_dir_in(&root, "latest"), Some(c2.clone()));
+        assert_eq!(
+            find_case_dir_in(&root, "case-20261114-scenario-010000"),
+            Some(c1)
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
 }
@@ -1422,7 +1521,10 @@ pub(crate) fn find_case_dir_in(cases_root: &Path, case_ref: &str) -> Option<Path
                 if let Ok(meta) = std::fs::metadata(&log_path) {
                     if meta.len() > 0 {
                         let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-                        if best.as_ref().is_none_or(|(prev, _)| mtime > *prev) {
+                        if best
+                            .as_ref()
+                            .is_none_or(|(prev_t, prev_d)| (mtime, &dir) > (*prev_t, prev_d))
+                        {
                             best = Some((mtime, dir));
                         }
                     }
@@ -1434,6 +1536,9 @@ pub(crate) fn find_case_dir_in(cases_root: &Path, case_ref: &str) -> Option<Path
 
     let days = std::fs::read_dir(cases_root).ok()?;
     for day in days.flatten() {
+        if !day.path().is_dir() {
+            continue;
+        }
         let cand = day.path().join(case_ref);
         if cand.join("case.jsonl").is_file() || cand.join("header.json").is_file() {
             return Some(cand);

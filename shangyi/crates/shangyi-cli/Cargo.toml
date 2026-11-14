@@ -1,7 +1,7 @@
 # 商奕 L3 交付层：命令行入口（设计文档 §10 与 Harness §13.6）。
 #
 # 本 crate 不依赖第三方 CLI 框架（clap 等）：商奕的 CLI 参数面很小
-# （new/resume/report/backtest/kb 五个子命令），自解析可避免为一层薄封装
+# （start/ui、new、resume、solve、report、backtest、kb、checkpoint、mcp-serve 九个子命令），自解析可避免为一层薄封装
 # 引入依赖树。**注意**：这样做的代价是失去自动生成的 help 与补全——
 # 若参数面增长，应改用 clap。
 #
@@ -34,7 +34,7 @@ shangyi-tools = { path = "../shangyi-tools" }
 shangyi-llm = { path = "../shangyi-llm" }
 # 理论库（kb_retrieve 的后端）
 shangyi-kb = { path = "../shangyi-kb" }
-# `mcp-serve` 子命令：把 38 个领域工具以 MCP stdio 服务暴露给 agent 运行时段
+# `mcp-serve` 子命令：把 39 个领域工具以 MCP stdio 服务暴露给 agent 运行时段
 # （DeepSeek Harness）。协议与宿主都在那个 crate 里，本层只做参数解析与进程入口。
 shangyi-mcp = { path = "../shangyi-mcp" }
 # 公开网页抓取与检索后端（web_fetch / web_search 的落点）

@@ -1,7 +1,7 @@
 //! `shangyi start` / `shangyi ui` 单一推荐新手入口：
 //!
 //! 1. 初始化持久化工作区 `$SHANGYI_HOME`（默认 `~/.shangyi/cases`）；
-//! 2. 解析当前正在执行的 `shangyi` 二进制作为 `SHANGYI_BIN`，确保 `mcp-shangyi` 38 项确定性工具不走丢；
+//! 2. 解析当前正在执行的 `shangyi` 二进制作为 `SHANGYI_BIN`，确保 `mcp-shangyi` 39 项确定性工具不走丢；
 //! 3. 检查并同步 DSH `shangyi-web` Profile 与三栏工作台插件；
 //! 4. 拉起 `dsh --profile shangyi-web`（默认端口 8791），自动打开工作台或输出访问地址。
 

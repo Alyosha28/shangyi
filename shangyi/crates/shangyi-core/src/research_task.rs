@@ -201,6 +201,7 @@ pub struct ResearchTask {
     failed_urls: BTreeSet<String>,
     fetch_attempts: BTreeSet<String>,
     searches: Vec<ResearchSearchReceipt>,
+    poi_attempts: usize,
     lookups: BTreeMap<String, DocumentLookup>,
     budget: ResearchBudget,
 }
@@ -223,6 +224,7 @@ impl ResearchTask {
             failed_urls: BTreeSet::new(),
             fetch_attempts: BTreeSet::new(),
             searches: vec![],
+            poi_attempts: 0,
             lookups: BTreeMap::new(),
             budget: ResearchBudget {
                 used: 0,
@@ -379,6 +381,21 @@ impl ResearchTask {
             limit,
             remaining: limit.saturating_sub(used),
         };
+    }
+
+    /// 记录一次 `poi_survey` 外部查询尝试（成功或受阻均计入尝试次数，
+    /// 但**不伪造**网页 `searches` 回执，以免在未跑公开网页检索时误放行 `not_found`）。
+    pub fn observe_poi(
+        &mut self,
+        scope_label: &str,
+        ok: bool,
+        detail: Option<&str>,
+        used: usize,
+        limit: usize,
+    ) {
+        self.poi_attempts += 1;
+        self.set_budget(used, limit);
+        let _ = (scope_label, ok, detail);
     }
 
     pub fn update(
@@ -551,7 +568,10 @@ impl ResearchTask {
                     {
                         return Err("reason_code无效；缺口只能归属于已有请求字段".into());
                     }
-                    if self.searches.is_empty() && self.fetch_attempts.is_empty() {
+                    if self.searches.is_empty()
+                        && self.fetch_attempts.is_empty()
+                        && self.poi_attempts == 0
+                    {
                         return Err("尚未实际查询，不能直接把公开字段标成未取得".into());
                     }
                     if reason == "budget_exhausted" && self.budget.remaining > 0 {

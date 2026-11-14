@@ -110,6 +110,8 @@ pub trait ToolExecutor {
     fn execute(&mut self, call: &ToolCall, phase: SessionPhase) -> ExecOutcome;
 
     fn begin_followup_task(&mut self) {}
+    fn set_task_scope(&mut self, _scope: Option<crate::task_scope::TaskScope>) {}
+    fn clear_artifact_keys(&mut self, _keys: &[String]) {}
     fn record_user_input(&mut self, _text: &str, _actor: &str) {}
     fn take_invalidated_artifacts(&mut self) -> Vec<crate::phase_graph::ArtifactKind> { Vec::new() }
     fn conditional_fallback(&mut self, _gaps: &[crate::conditional::EvidenceGap]) -> Result<crate::task_scope::ScopedTaskResult, String> {
@@ -212,14 +214,30 @@ impl<'a> PreStepGate<'a> {
     /// 铁律 2 的强制力因此不来自"每一步都拦"，而来自"**离开**必须经确认"——
     /// 这与 §7.6 的 checkpoint 生命周期（阶段末 → 提问 → 挂起 → 结算）一致，
     /// 且不存在自锁路径。该偏差已登记为差异 R21（见 `.shangyi-loop/DECISIONS.md`）。
-    /// 当前阶段在本模式路径上的**前驱**（进入条件的来源）。
+    /// 当前阶段在本模式路径上的**有效前驱**（进入条件的来源）。
     ///
-    /// 取主路径的上一个节点；若它是可选节点（`whatif` 的 `solve`），进入条件
-    /// 仍需满足它——因为"选择绕过"是运行期的决定，而闸门问的是"这条路走得通吗"。
-    fn predecessor(&self, phase: SessionPhase) -> Option<SessionPhase> {
+    /// 若直接前驱是可选节点（如 `whatif` 的 `solve`）且未带自身 checkpoint、
+    /// 同时尚未产生产物（说明选择了跳过而非先求解），则继续回溯到最近的非可选前驱
+    /// （如 `model_build`），从而保证 `model_build` 的产物与 `cp2` 确认依然被严格强制执行；
+    /// 若该可选前驱已产生产物，则仍按直接前驱检查。
+    fn effective_predecessor(&self, phase: SessionPhase) -> Option<SessionPhase> {
         let g = self.machine.graph();
-        let i = g.position(phase)?;
-        i.checked_sub(1).and_then(|j| g.path().get(j)).copied()
+        let mut cursor = {
+            let i = g.position(phase)?;
+            i.checked_sub(1).and_then(|j| g.path().get(j)).copied()?
+        };
+        while g.is_optional(cursor) && g.checkpoint_at(cursor).is_none() {
+            let missing_optional = g
+                .produces(cursor)
+                .iter()
+                .any(|k| !self.machine.has_artifact(*k));
+            if !missing_optional {
+                break;
+            }
+            let i = g.position(cursor)?;
+            cursor = i.checked_sub(1).and_then(|j| g.path().get(j)).copied()?;
+        }
+        Some(cursor)
     }
 
     pub fn decide(&self) -> PreStepDecision {
@@ -249,8 +267,8 @@ impl<'a> PreStepGate<'a> {
             }
         }
 
-        // 3) 进入条件：前驱阶段的产物 + 前驱的 checkpoint 已批准
-        if let Some(pred) = self.predecessor(phase) {
+        // 3) 进入条件：有效前驱阶段的产物 + 前驱的 checkpoint 已批准
+        if let Some(pred) = self.effective_predecessor(phase) {
             let missing: Vec<&str> = self
                 .machine
                 .graph()
@@ -800,6 +818,9 @@ impl<'a, T: Transport> AgentLoop<'a, T> {
     pub fn take_invalidated_artifacts(&mut self) -> Vec<crate::phase_graph::ArtifactKind> {
         self.executor.take_invalidated_artifacts()
     }
+    pub fn clear_executor_artifacts(&mut self, keys: &[String]) {
+        self.executor.clear_artifact_keys(keys);
+    }
 
     /// 生成本阶段可用的工具 schema（阶段白名单 + 剧本白名单，§7.3 的两层过滤）。
     /// 把执行器的产物登记进阶段机（循环每步后调用）。
@@ -1289,7 +1310,10 @@ impl<'a, T: Transport> AgentLoop<'a, T> {
                             self.emit_event(Event::TaskScopeSelected { scope, reason, at: self.now() });
                             ExecOutcome::Ok(serde_json::json!({"scope":scope,"phase":"intake","requires_game_analysis":!scope.is_brief()}).to_string())
                         }
-                        Err(error) => ExecOutcome::Failed(error.to_string()),
+                        Err(error) => {
+                            self.executor.set_task_scope(machine.task_scope());
+                            ExecOutcome::Failed(error.to_string())
+                        }
                     },
                     ExecOutcome::ScopedTaskCompleted(result) => match if result.scope==crate::task_scope::TaskScope::Conditional {
                         machine.finish_conditional_task(result.clone())

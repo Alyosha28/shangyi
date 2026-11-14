@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use shangyi_core::case_log::CaseHeader;
 use shangyi_core::clock::Clock;
-use shangyi_core::domain_exec::PoiProvider;
+use shangyi_core::domain_exec::{DomainState, PoiProvider, SwarmActorFactory};
 use shangyi_core::providers::{LiveSearch, AmapPoi, poi_for_mcp, search_for_mcp, swarm_for_mcp};
 use shangyi_core::task_scope::TaskScope;
 use shangyi_core::{
@@ -165,11 +165,26 @@ pub struct SessionHost {
 impl SessionHost {
     /// 打开一个咨询会话（新建或恢复）。
     pub fn open(config: HostConfig) -> Result<Self, HostError> {
+        Self::open_with_swarm_override(config, None)
+    }
+
+    /// 供离线集成测试注入显式 `SwarmActorFactory` 打开/恢复会话（不改生产环境变量）。
+    #[doc(hidden)]
+    pub fn open_with_swarm_override(
+        config: HostConfig,
+        swarm_override: Option<Box<dyn SwarmActorFactory<'static>>>,
+    ) -> Result<Self, HostError> {
         let explicit_home = config.home.clone();
         let resolved_home = resolve_home(explicit_home.as_deref());
 
         if let Some(resume_ref) = config.resume_case.clone() {
-            return Self::open_resumed(config, resume_ref, explicit_home, resolved_home);
+            return Self::open_resumed(
+                config,
+                resume_ref,
+                explicit_home,
+                resolved_home,
+                swarm_override,
+            );
         }
 
         let mode = config.mode;
@@ -186,7 +201,7 @@ impl SessionHost {
             .with_search(search)
             .with_poi_opt(poi.map(|p| p as &dyn PoiProvider))
             .with_wiki(load_wiki(resolved_home.as_deref()));
-        if let Some(swarm_factory) = swarm_for_mcp(explicit_home.as_deref()) {
+        if let Some(swarm_factory) = swarm_override.or_else(|| swarm_for_mcp(explicit_home.as_deref())) {
             executor = executor.with_swarm_actor(swarm_factory);
         }
         if let Some(home) = &resolved_home {
@@ -289,6 +304,7 @@ impl SessionHost {
         resume_ref: String,
         explicit_home: Option<PathBuf>,
         resolved_home: Option<PathBuf>,
+        swarm_override: Option<Box<dyn SwarmActorFactory<'static>>>,
     ) -> Result<Self, HostError> {
         let home = resolved_home.clone().ok_or_else(|| HostError::CaseResume {
             case: resume_ref.clone(),
@@ -328,7 +344,7 @@ impl SessionHost {
             .with_search(search)
             .with_poi_opt(poi.map(|p| p as &dyn PoiProvider))
             .with_wiki(load_wiki(Some(&home)));
-        if let Some(swarm_factory) = swarm_for_mcp(explicit_home.as_deref()) {
+        if let Some(swarm_factory) = swarm_override.or_else(|| swarm_for_mcp(explicit_home.as_deref())) {
             executor = executor.with_swarm_actor(swarm_factory);
         }
         let library = home.join("cases").join("library.json");
@@ -476,6 +492,15 @@ impl SessionHost {
                                 let req_url =
                                     args.get("url").and_then(Value::as_str).unwrap_or_default();
                                 executor.restore_fetched_page(req_url, output);
+                            } else if tool_name == "poi_survey" {
+                                executor.restore_poi_receipts(call_id, output);
+                            } else if tool_name == "data_ingest" {
+                                executor.restore_ingested_report(output);
+                            } else if tool_name == "swarm_run" {
+                                executor.restore_swarm_output(output);
+                                for (kind, fp) in executor.artifacts() {
+                                    machine.record(kind, fp);
+                                }
                             } else if is_deterministic_replay_tool(&tool_name) {
                                 let replay_call = ToolCall {
                                     call_id: call_id.clone(),
@@ -486,6 +511,15 @@ impl SessionHost {
                                 for (kind, fp) in executor.artifacts() {
                                     machine.record(kind, fp);
                                 }
+                                let invalidated =
+                                    ToolExecutor::take_invalidated_artifacts(&mut executor);
+                                if !invalidated.is_empty() {
+                                    let _ = machine.invalidate_user_dependent_artifacts(&invalidated);
+                                }
+                            }
+                        } else if let ToolOutcome::Blocked { detail } = outcome {
+                            if tool_name == "poi_survey" {
+                                executor.restore_poi_blocked(&args, detail);
                             }
                         }
                     }
@@ -565,13 +599,24 @@ impl SessionHost {
                                 .or_else(|| first.strip_prefix("驳回："))
                                 .unwrap_or(first)
                                 .to_string();
-                            let _ = machine.settle_checkpoint(
-                                cp_id,
-                                CheckpointStatus::Rejected {
-                                    reason,
-                                    at: at.clone(),
-                                },
-                            );
+                            executor.record_trusted_user_input(&reason, user_actor);
+                            let invalidated =
+                                ToolExecutor::take_invalidated_artifacts(&mut executor);
+                            if !invalidated.is_empty() {
+                                let _ = machine.invalidate_user_dependent_artifacts(&invalidated);
+                            }
+                            if matches!(
+                                machine.checkpoint_status(cp_id),
+                                Some(CheckpointStatus::Open { .. })
+                            ) {
+                                let _ = machine.settle_checkpoint(
+                                    cp_id,
+                                    CheckpointStatus::Rejected {
+                                        reason,
+                                        at: at.clone(),
+                                    },
+                                );
+                            }
                             post_checkpoint_user_messages.clear();
                             pending_external_cp_advance = false;
                         } else {
@@ -592,14 +637,23 @@ impl SessionHost {
                 Event::PhaseEntered { to, .. } => {
                     if let Some(target) = parse_session_phase(to) {
                         if machine.phase() != target {
-                            let _ = machine.advance_to(target).or_else(|_| machine.advance());
+                            let _ = machine
+                                .advance_to(target)
+                                .or_else(|_| machine.skip_optional_to(target))
+                                .or_else(|_| machine.advance());
                         }
                     }
                     pending_external_cp_advance = false;
                 }
-                Event::PhaseRewound { to, .. } => {
+                Event::PhaseRewound { from, to, .. } => {
                     if let Some(target) = parse_session_phase(to) {
-                        if let Ok(cleared) = machine.rollback_to(target) {
+                        if from == to && target == machine.phase() {
+                            if let Some(cp) = machine.graph().checkpoint_at(target) {
+                                if let Ok(cleared) = machine.reconsider_current_checkpoint(cp) {
+                                    executor.clear_artifact_keys(&cleared);
+                                }
+                            }
+                        } else if let Ok(cleared) = machine.rollback_to(target) {
                             executor.clear_artifact_keys(&cleared);
                         }
                         pending_rewind = None;
@@ -704,6 +758,11 @@ impl SessionHost {
         self.archive_enabled
     }
 
+    /// 只读访问领域执行器当前状态（供检查点/恢复状态检视与测试断言）。
+    pub fn domain_state(&self) -> &DomainState {
+        self.executor.state()
+    }
+
     /// 本阶段允许调用的工具名（阶段白名单 ∧ 任务范围）。
     pub fn allowed_tools(&self) -> Vec<String> {
         let phase = self.machine.phase();
@@ -747,7 +806,32 @@ impl SessionHost {
             });
         }
 
-        let phase_before = self.machine.phase();
+        let mut phase_before = self.machine.phase();
+        if dynamic_override_err.is_none()
+            && self.mode == ConsultationMode::Whatif
+            && phase_before == SessionPhase::Solve
+            && self.machine.graph().is_optional(SessionPhase::Solve)
+            && self.machine.allows_task_tool(name)
+            && self
+                .registry
+                .check_call(name, "solve", Some(self.playbook))
+                .is_err()
+            && self
+                .registry
+                .check_call(name, "consequence", Some(self.playbook))
+                .is_ok()
+        {
+            if let Ok(to) = self.machine.skip_optional_to(SessionPhase::Consequence) {
+                self.append_event(Event::PhaseEntered {
+                    from: phase_before.as_str().to_string(),
+                    to: to.as_str().to_string(),
+                    playbook: self.mode.as_str().to_string(),
+                    reason: "跳过可选 solve 阶段，直接进入 consequence".to_string(),
+                    at: at.clone(),
+                });
+                phase_before = to;
+            }
+        }
         self.call_seq += 1;
         let call_id = format!("mcp-{:04}", self.call_seq);
         self.append_event(Event::ToolCallStarted {
@@ -1677,14 +1761,17 @@ impl SessionHost {
                             log_outcome: ToolOutcome::Ok { output: out },
                         }
                     }
-                    Err(e) => Rendered {
-                        is_error: true,
-                        content: vec![format!("工具 `{name}` 调用失败：{e}")],
-                        suspend: true,
-                        log_outcome: ToolOutcome::Failed {
-                            error: e.to_string(),
-                        },
-                    },
+                    Err(e) => {
+                        self.executor.set_task_scope(self.machine.task_scope());
+                        Rendered {
+                            is_error: true,
+                            content: vec![format!("工具 `{name}` 调用失败：{e}")],
+                            suspend: true,
+                            log_outcome: ToolOutcome::Failed {
+                                error: e.to_string(),
+                            },
+                        }
+                    }
                 }
             }
             ExecOutcome::ScopedTaskCompleted(result) => {
@@ -2084,15 +2171,18 @@ fn is_deterministic_replay_tool(name: &str) -> bool {
             | "research_task_update"
             | "research_record"
             | "constraint_register"
+            | "constraint_check"
             | "business_cost"
             | "vn_map"
             | "pars_check"
             | "participant_profile_update"
             | "gamespec_build"
+            | "gamespec_validate"
             | "solve_equilibria"
             | "select_equilibria"
             | "select_fuse"
             | "preference_inject"
+            | "novel_move_filter"
             | "consequence_predict"
             | "discover_satisfice"
             | "recommend_build"

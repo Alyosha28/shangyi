@@ -2,7 +2,7 @@
 //!
 //! # 为何自解析而非用 clap
 //!
-//! 参数面很小（5 个子命令 + 少量选项），自解析可避免为一层薄封装引入依赖树。
+//! 参数面很小（9 个子命令（含 ui 别名） + 少量选项），自解析可避免为一层薄封装引入依赖树。
 //! **代价是失去自动 help 与补全**——若参数面增长应改用 clap。此权衡已写入
 //! `Cargo.toml` 的注释。
 //!
@@ -181,7 +181,11 @@ pub enum Command {
         no_open: bool,
     },
     /// 渲染报告。
-    Report { case: String, format: ReportFormat },
+    Report {
+        case: String,
+        format: ReportFormat,
+        output: Option<String>,
+    },
     /// 回测校准。
     Backtest { scenario: Option<String> },
     /// 知识库操作。
@@ -270,7 +274,7 @@ impl Command {
 pub fn parse(args: &[String]) -> Result<Command, CliError> {
     if args.is_empty() {
         return Err(CliError::UnknownCommand(
-            "（没给命令。可以：new 开聊 / resume 接着聊 / solve 算 / report 出报告 / backtest 校准 / kb 知识库）".into(),
+            "（没给命令。可以：start(ui) 启动工作台 / new 开聊 / resume 接着聊 / solve 离线求解 / report 出报告 / backtest 校准 / kb 知识库 / checkpoint 关口确认 / mcp-serve MCP服务）".into(),
         ));
     }
     let cmd = args[0].as_str();
@@ -286,32 +290,7 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         "solve" => parse_solve(rest),
         "checkpoint" => parse_checkpoint(rest),
         "mcp-serve" => parse_mcp_serve(rest),
-        "report" => {
-            let case = take_positional(rest, "report", "case")?;
-            let mut format = None;
-            let mut it = rest[1..].iter();
-            while let Some(a) = it.next() {
-                match a.as_str() {
-                    "--format" | "-f" => {
-                        let v = it.next().ok_or_else(|| CliError::MissingArg {
-                            command: "report".into(),
-                            arg: "--format".into(),
-                        })?;
-                        format = Some(ReportFormat::parse(v)?);
-                    }
-                    other => {
-                        return Err(CliError::UnknownOption {
-                            command: "report".into(),
-                            opt: other.to_string(),
-                        })
-                    }
-                }
-            }
-            Ok(Command::Report {
-                case,
-                format: format.unwrap_or(ReportFormat::Pdf),
-            })
-        }
+        "report" => parse_report(rest),
         "backtest" => {
             let mut scenario = None;
             let mut it = rest.iter();
@@ -384,6 +363,57 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         }
         other => Err(CliError::UnknownCommand(other.to_string())),
     }
+}
+
+fn parse_report(rest: &[String]) -> Result<Command, CliError> {
+    let mut case: Option<String> = None;
+    let mut format: Option<ReportFormat> = None;
+    let mut output: Option<String> = None;
+
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--format" | "-f" => {
+                let v = it.next().ok_or_else(|| CliError::MissingArg {
+                    command: "report".into(),
+                    arg: "--format".into(),
+                })?;
+                format = Some(ReportFormat::parse(v)?);
+            }
+            "--output" | "-o" => {
+                let v = it.next().ok_or_else(|| CliError::MissingArg {
+                    command: "report".into(),
+                    arg: "--output".into(),
+                })?;
+                if v.trim().is_empty() {
+                    return Err(CliError::InvalidValue {
+                        value: v.clone(),
+                        allowed: vec!["非空输出文件路径（或 `-` 仅限 md）".into()],
+                    });
+                }
+                output = Some(v.clone());
+            }
+            other if !other.starts_with('-') && case.is_none() => {
+                case = Some(other.to_string());
+            }
+            other => {
+                return Err(CliError::UnknownOption {
+                    command: "report".into(),
+                    opt: other.to_string(),
+                })
+            }
+        }
+    }
+
+    let case = case.ok_or_else(|| CliError::MissingArg {
+        command: "report".into(),
+        arg: "case".into(),
+    })?;
+    Ok(Command::Report {
+        case,
+        format: format.unwrap_or(ReportFormat::Md),
+        output,
+    })
 }
 
 fn parse_start(rest: &[String]) -> Result<Command, CliError> {
@@ -737,7 +767,8 @@ pub fn help() -> String {
     s.push_str("  shangyi start [--port <端口>] [--no-open]\n");
     s.push_str("  shangyi new [--mode scenario|whatif|discover] [--playbook <id>] [--action <你打算怎么做>]\n");
     s.push_str("  shangyi resume <案例>\n");
-    s.push_str("  shangyi report <案例ID|latest|目录|case.jsonl> [--format md|pdf|docx]\n");
+    s.push_str("  shangyi report <案例ID|latest|目录|case.jsonl> [--format md|pdf|docx] [-o|--output <文件>]\n");
+    s.push_str("                 （默认 md 输出到 stdout；pdf/docx 按需调用本机 pandoc 生成到文件）\n");
     s.push_str("  shangyi kb list | kb search <关键词> | kb show <词条id> | kb add <路径>\n");
     s.push_str("  shangyi backtest [--scenario <id>]\n");
     s.push_str("  shangyi solve --in <gamespec.json> [--method support_enumeration|lemke_howson|analytic]\n");

@@ -645,7 +645,8 @@ impl<'a, T: Transport> SessionRunner<'a, T> {
     /// 回退阶段（用户否决 checkpoint 后重做）。
     pub fn rewind_to(&mut self, target: SessionPhase, due_to: &str) -> Result<(), RunError> {
         let from = self.machine.phase();
-        self.machine.rollback_to(target)?;
+        let cleared = self.machine.rollback_to(target)?;
+        self.r#loop.clear_executor_artifacts(&cleared);
         self.record(
             Event::PhaseRewound {
                 from: from.as_str().to_string(),
@@ -775,7 +776,8 @@ impl<'a, T: Transport> SessionRunner<'a, T> {
                             CheckpointAnswer::Approve => None,
                         };
                         if let Some(request) = request {
-                            self.machine.reconsider_current_checkpoint(cp)?;
+                            let cleared = self.machine.reconsider_current_checkpoint(cp)?;
+                            self.r#loop.clear_executor_artifacts(&cleared);
                             self.record(Event::PhaseRewound {
                                 from:self.machine.phase().as_str().into(),
                                 to:self.machine.phase().as_str().into(),due_to:request.clone(),at:self.r#loop_now(),
