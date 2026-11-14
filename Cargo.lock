@@ -541,6 +541,7 @@ dependencies = [
  "shangyi-llm",
  "shangyi-mcp",
  "shangyi-playbooks",
+ "shangyi-report",
  "shangyi-selection",
  "shangyi-swarm",
  "shangyi-tools",

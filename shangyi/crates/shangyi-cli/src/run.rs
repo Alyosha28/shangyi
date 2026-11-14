@@ -768,36 +768,8 @@ fn credentials_error_from_api(msg: &str, model: &str, attempt: u32) -> RunFailur
 /// 这与「检索后端缺失」的处置一致：**缺一个可选能力不等于流程不能跑，
 /// 但绝不能让"缺"看起来像"没有"**。
 fn load_wiki(fallback: &TheoryLibrary) -> Option<std::sync::Arc<shangyi_kb::wiki::Wiki>> {
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(d) = std::env::var("SHANGYI_KB_DIR") {
-        if !d.trim().is_empty() {
-            candidates.push(std::path::PathBuf::from(d.trim()));
-        }
-    }
-    if let Ok(home) = shangyi_home() {
-        candidates.push(home.join("kb"));
-    }
-    candidates.push(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../kb"),
-    );
-
-    for dir in candidates {
-        if !dir.is_dir() {
-            continue;
-        }
-        match shangyi_kb::wiki::load_dir(&dir) {
-            Ok(w) => return Some(std::sync::Arc::new(w)),
-            Err(e) => {
-                // **加载失败要说出来**：静默退回"无知识库"会让
-                // "知识页写坏了"表现为"知识库是空的"。
-                eprintln!("商奕：知识库 {dir:?} 加载失败：{e}");
-                eprintln!("       （本次咨询将以无知识库模式进行）");
-                return None;
-            }
-        }
-    }
     let _ = fallback;
-    None
+    crate::kb_cmd::load_combined_wiki_for_runtime()
 }
 
 fn date_compact(iso: &str) -> String {
@@ -1423,7 +1395,7 @@ pub fn settle_case_checkpoint(
     Ok(())
 }
 
-fn find_case_dir_in(cases_root: &Path, case_ref: &str) -> Option<PathBuf> {
+pub(crate) fn find_case_dir_in(cases_root: &Path, case_ref: &str) -> Option<PathBuf> {
     if case_ref == "latest" {
         if let Ok(active_text) = std::fs::read_to_string(cases_root.join("active.json")) {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&active_text) {

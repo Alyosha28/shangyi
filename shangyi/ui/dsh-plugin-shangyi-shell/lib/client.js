@@ -825,6 +825,126 @@ window.__ModuleLoader__.load({
       return "paper";
     }
 
+    function HealthBanner() {
+      var st = React.useState({ health: null, loading: false, dismissed: false });
+      var state = st[0], setState = st[1];
+
+      var refresh = React.useCallback(function () {
+        setState(function (prev) { return { health: prev.health, loading: true, dismissed: false }; });
+        fetch("/api/shangyi/health", { cache: "no-store" })
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            setState({ health: data, loading: false, dismissed: false });
+          })
+          .catch(function (err) {
+            setState({
+              health: {
+                ok: false,
+                problems: [{
+                  code: "health_unreachable",
+                  severity: "blocking",
+                  title: "无法连接商奕宿主健康检查接口",
+                  detail: String(err && err.message ? err.message : err),
+                  fixCommands: ["shangyi start"]
+                }]
+              },
+              loading: false,
+              dismissed: false
+            });
+          });
+      }, []);
+
+      React.useEffect(function () {
+        refresh();
+        var timer = setInterval(refresh, 15000);
+        return function () { clearInterval(timer); };
+      }, [refresh]);
+
+      var health = state.health;
+      if (!health || health.ok || state.dismissed) return null;
+
+      var problems = Array.isArray(health.problems) ? health.problems : [];
+      var primary = problems[0] || {
+        title: "商奕确定性求解内核未就绪",
+        detail: "缺少可执行 shangyi 内核或 MCP 工具未连接，当前若继续对话将退化为无工具自由发挥，严禁用于正式商业决策。",
+        fixCommands: ["shangyi start"]
+      };
+      var cmd = Array.isArray(primary.fixCommands) && primary.fixCommands.length ? primary.fixCommands[0] : "shangyi start";
+
+      return h("div", {
+        role: "alert",
+        "data-shangyi-health-banner": "degraded",
+        style: {
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "12px",
+          flexWrap: "wrap",
+          padding: "8px 16px",
+          background: "var(--dsw-alias-bg-layer-2)",
+          borderTop: "2px solid var(--dsw-alias-state-error-primary)",
+          color: "var(--dsw-alias-label-primary)",
+          fontFamily: FONT_SANS,
+          fontSize: "12px",
+          lineHeight: "18px"
+        }
+      },
+        h("div", { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", flex: "1 1 320px" } },
+          h("span", {
+            style: {
+              padding: "2px 8px",
+              borderRadius: "4px",
+              background: "var(--dsw-alias-state-error-primary)",
+              color: "var(--dsw-alias-label-primary-foreground)",
+              fontWeight: 600,
+              whiteSpace: "nowrap"
+            }
+          }, "内核未就绪 · 禁止盲聊"),
+          h("strong", { style: { color: "var(--dsw-alias-state-error-primary)" } }, primary.title),
+          h("span", { style: { color: "var(--dsw-alias-label-secondary)" } }, primary.detail),
+          h("code", {
+            style: {
+              padding: "2px 8px",
+              borderRadius: "4px",
+              background: "var(--dsw-alias-bg-layer-3)",
+              border: "1px solid var(--dsw-alias-border-l1)",
+              color: "var(--dsw-alias-label-primary)",
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace"
+            }
+          }, cmd)
+        ),
+        h("div", { style: { display: "flex", alignItems: "center", gap: "8px" } },
+          h("button", {
+            type: "button",
+            disabled: state.loading,
+            onClick: refresh,
+            style: {
+              padding: "4px 10px",
+              borderRadius: "6px",
+              border: "1px solid var(--dsw-alias-border-l2)",
+              background: "var(--dsw-alias-bg-base)",
+              color: "var(--dsw-alias-label-primary)",
+              cursor: "pointer",
+              fontSize: "12px"
+            }
+          }, state.loading ? "检测中…" : "重新检测"),
+          h("button", {
+            type: "button",
+            onClick: function () { setState(function (prev) { return { health: prev.health, loading: prev.loading, dismissed: true }; }); },
+            style: {
+              padding: "4px 8px",
+              borderRadius: "6px",
+              border: "1px solid var(--dsw-alias-border-l1)",
+              background: "transparent",
+              color: "var(--dsw-alias-label-secondary)",
+              cursor: "pointer",
+              fontSize: "12px"
+            }
+          }, "暂收")
+        )
+      );
+    }
+
     function apply(ctx) {
       var variant = readVariant();
 
@@ -849,6 +969,9 @@ window.__ModuleLoader__.load({
         return ctx.slots.register({ name: "shell.overlay", id: "shangyi-material", order: -10 }, function () {
           return h(MaterialLayer, { variant: variant });
         });
+      });
+      ctx.slots.inject("shell.bottom", function () {
+        return ctx.slots.register({ name: "shell.bottom", id: "shangyi-health-banner", order: 10 }, HealthBanner);
       });
     }
 

@@ -672,6 +672,7 @@ window.__ModuleLoader__.load({
     SYData.CASES_URL = "/api/shangyi/cases";
     SYData.KB_URL = "/api/shangyi/kb";
     SYData.CHECKPOINT_URL = "/api/shangyi/checkpoint";
+    SYData.HEALTH_URL = "/api/shangyi/health";
 
     SYData.cardsUrl = function (caseId) {
       return "/api/shangyi/cards?case=" + encodeURIComponent(caseId || "latest-cards");
@@ -691,6 +692,20 @@ window.__ModuleLoader__.load({
         .then(function (j) {
           if (!j || j.ok !== true) throw new Error((j && j.error) || "接口返回 ok=false");
           return j;
+        });
+    };
+
+    /** 内核健康检查 GET：保留 ok=false 时的 problems 诊断负载以便前端强提示。 */
+    SYData.getHealth = function () {
+      return fetch(SYData.HEALTH_URL, { headers: { accept: "application/json" }, cache: "no-store" })
+        .then(function (r) {
+          return r.json().catch(function () { return null; }).then(function (j) {
+            if (!r.ok && (!j || !Array.isArray(j.problems))) {
+              throw new Error((j && j.error) || ("HTTP " + r.status));
+            }
+            if (!j || typeof j !== "object") throw new Error("健康检查响应为空");
+            return j;
+          });
         });
     };
 
@@ -873,7 +888,81 @@ window.__ModuleLoader__.load({
       return items;
     };
 
-    /** /api/shangyi/cards → 工作台用的收窄视图；matrix/solve/selection 原样保留。 */
+    SYData.PARAM_SOURCE_LABELS = {
+      user_confirmed: "用户当面确认",
+      confirmed_assumption: "已确认情景假设",
+      public_data: "公开数据",
+      industry_prior: "行业先验（非本案实证）",
+      assumed: "未确认假设（禁止入解）",
+      derived: "引擎派生",
+      unknown: "未标注来源"
+    };
+
+    SYData.PARAM_SOURCE_TONES = {
+      user_confirmed: "ok",
+      confirmed_assumption: "ok",
+      public_data: "ok",
+      industry_prior: "warn",
+      assumed: "err",
+      derived: "mute",
+      unknown: "err"
+    };
+
+    SYData.COST_TREATMENT_LABELS = {
+      cash_expense: "一次性/当期现金支出",
+      recurring_cash: "周期性现金支出",
+      refundable_deposit: "可退押金（资金占用）",
+      opportunity_cost: "机会成本（非现金）",
+      non_cash: "非现金账面项"
+    };
+
+    SYData.PERIOD_LABELS = {
+      once: "一次性",
+      day: "按日",
+      week: "按周",
+      month: "按月",
+      quarter: "按季",
+      year: "按年"
+    };
+
+    SYData.KB_KIND_LABELS = {
+      theory: "核心理论",
+      method: "研究方法",
+      concept: "决策概念"
+    };
+
+    SYData.ONBOARDING_EXAMPLES = [
+      {
+        id: "pricing",
+        tag: "定价博弈",
+        title: "新竞对 9.9 元低价抢客，我跟不跟降？",
+        hint: "输出双方支付矩阵、纳什均衡概率与跟降/稳价条件后果",
+        prompt: "商圈隔壁新开了一家主打 9.9 元团购的连锁现制茶饮店，我家单杯售价 18 元、毛利 11 元、月固定房租人工 3.8 万，要不要跟进降价还是推会员复购？请帮我做完整博弈推演。"
+      },
+      {
+        id: "location_cost",
+        tag: "费用精算",
+        title: "双铺位开店选址与硬底线成本核账",
+        hint: "严格分清一次性现金、可退押金与缺项（未取得绝不补 0）",
+        prompt: "我想在大学城开一家 24 小时自习室，看中两个铺位：A 铺月租 1.4 万、押三付一、转让费 9 万；B 铺月租 9 千、无转让费但消防改造报价待核。手头可用预算 18 万，请先帮我做成本精算与选址补证清单。"
+      },
+      {
+        id: "negotiation",
+        tag: "谈判对策",
+        title: "大客户年底续约砍价 25%，测算真假虚晃",
+        hint: "评估切换成本与承诺可信度，找到我方守住底线的均衡报价带",
+        prompt: "一家占我司 30% 营收的 SaaS 老客户年底续约要求降价 25%，否则声称切到竞品；我方与客户切换迁移成本都很高。请分析对方虚张声势的概率与我的让步底线。"
+      },
+      {
+        id: "intel",
+        tag: "情报快查",
+        title: "竞品突然取消大促、收缩一线城市信号拆解",
+        hint: "先区分公开实证信号与未核假设，给出下一步核查清单",
+        prompt: "头部竞品近期突然取消大促并关闭两家一线旗舰店，这更可能是现金流承压收缩，还是转向高端差异化提价？请只基于可验证信号给出判断边界与待核清单。"
+      }
+    ];
+
+    /** /api/shangyi/cards → 工作台用的完整只读视图；不推导、不回填缺失数字。 */
     SYData.normalizeCards = function (json) {
       if (!json || typeof json !== "object") throw new Error("案例数据为空");
       var meta = json.meta || {};
@@ -888,6 +977,12 @@ window.__ModuleLoader__.load({
           at: json.pendingCheckpointDetail.at || null
         }
         : null;
+      var rawScopeDetail = (json.scopeDetail && typeof json.scopeDetail === "object") ? json.scopeDetail : {};
+      var rawCosts = (json.costs && typeof json.costs === "object") ? json.costs : {};
+      var rawAssumptions = (json.assumptions && typeof json.assumptions === "object") ? json.assumptions : {};
+      var rawEvidence = (json.evidence && typeof json.evidence === "object") ? json.evidence : {};
+      var rawConclusion = (json.conclusion && typeof json.conclusion === "object") ? json.conclusion : {};
+
       return {
         requested: json.requested || null,
         caseId: source.caseId || meta.case_id || null,
@@ -915,7 +1010,43 @@ window.__ModuleLoader__.load({
         matrix: json.matrix || null,
         solve: json.solve || null,
         selection: json.selection || null,
-        failures: Array.isArray(json.failures) ? json.failures : []
+        failures: Array.isArray(json.failures) ? json.failures : [],
+        scopeDetail: {
+          scope: rawScopeDetail.scope || meta.scope || null,
+          reason: rawScopeDetail.reason || null,
+          scopedResult: rawScopeDetail.scopedResult || null,
+          conditional: rawScopeDetail.conditional || null
+        },
+        costs: {
+          scenarios: Array.isArray(rawCosts.scenarios) ? rawCosts.scenarios : [],
+          constraints: Array.isArray(rawCosts.constraints) ? rawCosts.constraints : [],
+          constraintCheck: rawCosts.constraintCheck || null,
+          missingItems: Array.isArray(rawCosts.missingItems) ? rawCosts.missingItems : []
+        },
+        assumptions: {
+          players: Array.isArray(rawAssumptions.players) ? rawAssumptions.players : [],
+          params: Array.isArray(rawAssumptions.params) ? rawAssumptions.params : [],
+          counts: rawAssumptions.counts || {},
+          gaps: Array.isArray(rawAssumptions.gaps) ? rawAssumptions.gaps : []
+        },
+        evidence: {
+          checkpoints: Array.isArray(rawEvidence.checkpoints) ? rawEvidence.checkpoints : [],
+          sources: Array.isArray(rawEvidence.sources) ? rawEvidence.sources : [],
+          poiSurveys: Array.isArray(rawEvidence.poiSurveys) ? rawEvidence.poiSurveys : [],
+          researchRecords: Array.isArray(rawEvidence.researchRecords) ? rawEvidence.researchRecords : [],
+          kbQueries: Array.isArray(rawEvidence.kbQueries) ? rawEvidence.kbQueries : [],
+          tools: Array.isArray(rawEvidence.tools) ? rawEvidence.tools : [],
+          exploratoryCalls: typeof rawEvidence.exploratoryCalls === "number" ? rawEvidence.exploratoryCalls : 0
+        },
+        conclusion: {
+          headline: rawConclusion.headline || null,
+          recommend: rawConclusion.recommend || null,
+          consequence: rawConclusion.consequence || null,
+          discovery: rawConclusion.discovery || null,
+          reportModel: rawConclusion.reportModel || null,
+          hasEngineResult: Boolean(rawConclusion.hasEngineResult),
+          hasExploratoryOnly: Boolean(rawConclusion.hasExploratoryOnly)
+        }
       };
     };
 
@@ -945,10 +1076,18 @@ window.__ModuleLoader__.load({
       return out;
     };
 
-    // ── 格式化（只格式化，不换算法） ──
+    // ── 格式化（只格式化，不换算法；null 永不写成 0） ──
     SYData.fmtNum = function (n) {
       if (typeof n !== "number" || !isFinite(n)) return "—";
       return n.toLocaleString("zh-CN");
+    };
+
+    SYData.fmtCostValue = function (v, currency) {
+      if (v === null || v === undefined || v === "") return "未取得";
+      if (typeof v === "number" && isFinite(v)) {
+        return v.toLocaleString("zh-CN") + (currency ? (" " + currency) : "");
+      }
+      return String(v);
     };
 
     SYData.fmtTime = function (iso) {
@@ -966,6 +1105,291 @@ window.__ModuleLoader__.load({
       var s = String(id);
       if (s.length <= 24) return s;
       return s.slice(0, 12) + "…" + s.slice(-8);
+    };
+
+    SYData.paramSourceLabel = function (kind) {
+      return SYData.PARAM_SOURCE_LABELS[kind] || String(kind || "未标注");
+    };
+
+    SYData.paramSourceTone = function (kind) {
+      return SYData.PARAM_SOURCE_TONES[kind] || "mute";
+    };
+
+    SYData.costTreatmentLabel = function (t) {
+      return SYData.COST_TREATMENT_LABELS[t] || String(t || "—");
+    };
+
+    SYData.periodLabel = function (p) {
+      return SYData.PERIOD_LABELS[p] || String(p || "—");
+    };
+
+    SYData.safeHref = function (raw) {
+      if (!raw || typeof raw !== "string") return null;
+      var s = raw.trim();
+      if (/^https?:\/\//i.test(s)) return s;
+      return null;
+    };
+
+    /** 把 Markdown 里的 [[wiki-link]] 解析为知识库 slug（匹配 slug / id / title / 横线下划线等价）。 */
+    SYData.resolveKbSlug = function (target, items) {
+      var clean = String(target || "").trim().split("#")[0].replace(/^\.\//, "").replace(/\.md$/i, "");
+      if (!clean) return "";
+      var list = Array.isArray(items) ? items : [];
+      var i;
+      for (i = 0; i < list.length; i++) {
+        if (list[i] && list[i].slug === clean) return list[i].slug;
+      }
+      for (i = 0; i < list.length; i++) {
+        if (list[i] && (list[i].id === clean || list[i].title === clean)) return list[i].slug || clean;
+      }
+      var norm = clean.toLowerCase().replace(/[\s_]+/g, "-");
+      for (i = 0; i < list.length; i++) {
+        var d = list[i] || {};
+        var ds = String(d.slug || "").toLowerCase().replace(/[\s_]+/g, "-");
+        var di = String(d.id || "").toLowerCase().replace(/[\s_]+/g, "-");
+        var dt = String(d.title || "").toLowerCase().replace(/[\s_]+/g, "-");
+        if (ds === norm || di === norm || dt === norm) return d.slug || clean;
+      }
+      return clean;
+    };
+
+    /** 解析知识库 front-matter 与正文，避免把裸 YAML 当普通文本显示。 */
+    SYData.parseFrontMatterAndBody = function (markdown) {
+      var text = String(markdown || "").replace(/\r\n/g, "\n");
+      var fm = {};
+      var body = text;
+      if (text.indexOf("---\n") === 0) {
+        var end = text.indexOf("\n---", 3);
+        if (end >= 0) {
+          var lines = text.slice(4, end).split("\n");
+          for (var i = 0; i < lines.length; i++) {
+            var m = /^([A-Za-z_][\w-]*):[ \t]*(.*)$/.exec(lines[i].trim());
+            if (m) {
+              var v = m[2].trim();
+              if ((v.charAt(0) === '"' && v.charAt(v.length - 1) === '"') ||
+                  (v.charAt(0) === "'" && v.charAt(v.length - 1) === "'")) {
+                v = v.slice(1, -1);
+              }
+              fm[m[1]] = v;
+            }
+          }
+          body = text.slice(end + 4).replace(/^\n+/, "");
+        }
+      }
+      return { meta: fm, body: body };
+    };
+
+    /** 行内 Markdown AST（纯文本节点 / strong / code / safe link / wiki-link），绝不用 dangerouslySetInnerHTML。 */
+    SYData.parseInlineTokens = function (line) {
+      var s = String(line || "");
+      var out = [];
+      var pos = 0;
+      var re = /(\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]|`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\(([^)]+)\))/g;
+      var m;
+      while ((m = re.exec(s)) !== null) {
+        if (m.index > pos) out.push({ type: "text", text: s.slice(pos, m.index) });
+        if (m[2] !== undefined) {
+          out.push({ type: "wiki", target: m[2].trim(), label: (m[3] || m[2]).trim() });
+        } else if (m[4] !== undefined) {
+          out.push({ type: "code", text: m[4] });
+        } else if (m[5] !== undefined) {
+          out.push({ type: "bold", text: m[5] });
+        } else if (m[6] !== undefined && m[7] !== undefined) {
+          var safe = SYData.safeHref(m[7]);
+          if (safe) out.push({ type: "link", text: m[6], href: safe });
+          else out.push({ type: "text", text: m[6] + " (" + m[7] + ")" });
+        }
+        pos = re.lastIndex;
+      }
+      if (pos < s.length) out.push({ type: "text", text: s.slice(pos) });
+      return out;
+    };
+
+    /** 块级 Markdown AST：支持标题、无序/有序列表、引用、代码块、表格、段落。 */
+    SYData.parseMarkdownBlocks = function (markdown) {
+      var lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+      var blocks = [];
+      var i = 0;
+      while (i < lines.length) {
+        var line = lines[i];
+        var trimmed = line.trim();
+        if (!trimmed) { i++; continue; }
+
+        if (/^```/.test(trimmed)) {
+          var lang = trimmed.slice(3).trim();
+          var codeLines = [];
+          i++;
+          while (i < lines.length && !/^```/.test(lines[i].trim())) {
+            codeLines.push(lines[i]);
+            i++;
+          }
+          if (i < lines.length) i++;
+          blocks.push({ type: "code", lang: lang, text: codeLines.join("\n") });
+          continue;
+        }
+
+        var hm = /^(#{1,4})[ \t]+(.+)$/.exec(trimmed);
+        if (hm) {
+          blocks.push({ type: "heading", level: hm[1].length, text: hm[2].trim() });
+          i++;
+          continue;
+        }
+
+        if (/^---+$/.test(trimmed) || /^\*\*\*+$/.test(trimmed)) {
+          blocks.push({ type: "hr" });
+          i++;
+          continue;
+        }
+
+        if (/^>\s?/.test(trimmed)) {
+          var ql = [];
+          while (i < lines.length && /^>\s?/.test(lines[i].trim())) {
+            ql.push(lines[i].trim().replace(/^>\s?/, ""));
+            i++;
+          }
+          blocks.push({ type: "quote", text: ql.join("\n") });
+          continue;
+        }
+
+        if (trimmed.indexOf("|") === 0 && i + 1 < lines.length && /^\|[\s:|-]+\|?$/.test(lines[i + 1].trim())) {
+          function splitRow(r) {
+            return r.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(function (c) { return c.trim(); });
+          }
+          var headers = splitRow(trimmed);
+          i += 2;
+          var rows = [];
+          while (i < lines.length && lines[i].trim().indexOf("|") >= 0 && lines[i].trim() !== "") {
+            rows.push(splitRow(lines[i]));
+            i++;
+          }
+          blocks.push({ type: "table", headers: headers, rows: rows });
+          continue;
+        }
+
+        if (/^[-*+]\s+/.test(trimmed)) {
+          var ulItems = [];
+          while (i < lines.length && /^[-*+]\s+/.test(lines[i].trim())) {
+            ulItems.push(lines[i].trim().replace(/^[-*+]\s+/, ""));
+            i++;
+          }
+          blocks.push({ type: "ul", items: ulItems });
+          continue;
+        }
+
+        if (/^\d+\.\s+/.test(trimmed)) {
+          var olItems = [];
+          while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
+            olItems.push(lines[i].trim().replace(/^\d+\.\s+/, ""));
+            i++;
+          }
+          blocks.push({ type: "ol", items: olItems });
+          continue;
+        }
+
+        var para = [];
+        while (i < lines.length) {
+          var cur = lines[i].trim();
+          if (!cur || /^```/.test(cur) || /^#{1,4}[ \t]+/.test(cur) || /^>\s?/.test(cur) ||
+              /^[-*+]\s+/.test(cur) || /^\d+\.\s+/.test(cur) ||
+              (cur.indexOf("|") === 0 && i + 1 < lines.length && /^\|[\s:|-]+\|?$/.test(lines[i + 1].trim()))) {
+            break;
+          }
+          para.push(cur);
+          i++;
+        }
+        if (para.length) blocks.push({ type: "p", text: para.join(" ") });
+      }
+      return blocks;
+    };
+
+    /** 按严格铁律 1 导出当前案例只读 Markdown 报告：绝不重算、绝不把 null 成本填 0、绝不输出 sandbox_exec 数字。 */
+    SYData.exportReportMarkdown = function (cards) {
+      if (!cards) return "";
+      var lines = [];
+      var m = cards.meta || {};
+      var conc = cards.conclusion || {};
+      lines.push("# 商奕决策报告：" + (cards.caseId || m.caseId || "未命名案例"));
+      lines.push("");
+      lines.push("- **案例 ID**：`" + (cards.caseId || m.caseId || "—") + "`");
+      lines.push("- **模式 / 剧本 / 范围**：`" + SYData.modeLabel(m.mode) + "` / `" + (SYData.playbookLabel(m.playbook) || "未绑定") + "` / `" + SYData.scopeLabel(m.scope) + "`");
+      lines.push("- **证据日志**：`" + ((cards.source && cards.source.path) || "—") + "`");
+      if (cards.evidence && cards.evidence.exploratoryCalls > 0) {
+        lines.push("");
+        lines.push("> **⚠ 探索性工具隔离声明**：本案例曾有 " + cards.evidence.exploratoryCalls + " 次 `sandbox_exec`（`TrustLevel::Exploratory`）调用，已全部隔离排除出本报告数字。");
+      }
+      lines.push("");
+      lines.push("## 一、白话结论与下一步行动");
+      lines.push("");
+      if (conc.headline) {
+        lines.push("**核心结论**：" + conc.headline);
+        lines.push("");
+      }
+      if (conc.recommend && Array.isArray(conc.recommend.actions) && conc.recommend.actions.length) {
+        lines.push("### 建议推进动作");
+        lines.push("");
+        for (var ai = 0; ai < conc.recommend.actions.length; ai++) {
+          var act = conc.recommend.actions[ai] || {};
+          lines.push((ai + 1) + ". **" + (act.action || "") + "**" + (act.rationale ? (" — 依据：" + act.rationale) : ""));
+        }
+        lines.push("");
+      }
+      if (conc.recommend && Array.isArray(conc.recommend.do_not) && conc.recommend.do_not.length) {
+        lines.push("### 明确不建议（底线避坑）");
+        lines.push("");
+        for (var di = 0; di < conc.recommend.do_not.length; di++) lines.push("- " + conc.recommend.do_not[di]);
+        lines.push("");
+      }
+      if (cards.costs && Array.isArray(cards.costs.scenarios) && cards.costs.scenarios.length) {
+        lines.push("## 二、成本精算与硬约束");
+        lines.push("");
+        for (var ci = 0; ci < cards.costs.scenarios.length; ci++) {
+          var sc = cards.costs.scenarios[ci] || {};
+          lines.push("### 方案：" + (sc.scenario || sc.scenario_id || ("方案 " + (ci + 1))));
+          lines.push("- 期初现金总需求（含押金）：`" + SYData.fmtCostValue(sc.listed_upfront_cash, sc.currency) + "`");
+          lines.push("- 一次性现金支出：`" + SYData.fmtCostValue(sc.listed_upfront_cash_expense, sc.currency) + "`");
+          lines.push("- 可退押金：`" + SYData.fmtCostValue(sc.listed_refundable_deposits, sc.currency) + "`");
+          lines.push("- 月固定现金支出：`" + SYData.fmtCostValue(sc.listed_monthly_fixed_cost, sc.currency) + "`");
+          if (Array.isArray(sc.items) && sc.items.length) {
+            lines.push("");
+            lines.push("| 费用项目 | 性质分类 | 周期 | 标准化金额 | 来源 | 缺项说明 |");
+            lines.push("|---|---|---|---|---|---|");
+            for (var ii = 0; ii < sc.items.length; ii++) {
+              var it = sc.items[ii] || {};
+              lines.push("| " + (it.name || "—") + " | " + SYData.costTreatmentLabel(it.treatment) + " | " + SYData.periodLabel(it.normalized_period) + " | `" + SYData.fmtCostValue(it.normalized_amount, sc.currency) + "` | " + (it.source || "—") + " | " + (it.missing_amount_reason || "") + " |");
+            }
+          }
+          lines.push("");
+        }
+      }
+      if (cards.assumptions && Array.isArray(cards.assumptions.params) && cards.assumptions.params.length) {
+        lines.push("## 三、关键假设与四类证据来源");
+        lines.push("");
+        lines.push("| 参数 | 值/引用 | 单位 | 来源分类 | 来源明细 |");
+        lines.push("|---|---|---|---|---|");
+        for (var pi = 0; pi < cards.assumptions.params.length; pi++) {
+          var p = cards.assumptions.params[pi] || {};
+          lines.push("| " + (p.name || p.key) + " | `" + (p.valueText || "—") + "` | " + (p.unit || "—") + " | " + SYData.paramSourceLabel(p.sourceKind) + " | " + (p.sourceDetail || "") + " |");
+        }
+        lines.push("");
+      }
+      if (cards.assumptions && Array.isArray(cards.assumptions.gaps) && cards.assumptions.gaps.length) {
+        lines.push("## 四、尚未核清与证据缺口");
+        lines.push("");
+        for (var gi = 0; gi < cards.assumptions.gaps.length; gi++) {
+          lines.push("- " + cards.assumptions.gaps[gi]);
+        }
+        lines.push("");
+      }
+      if (cards.evidence && Array.isArray(cards.evidence.sources) && cards.evidence.sources.length) {
+        lines.push("## 五、公开外部来源");
+        lines.push("");
+        for (var si = 0; si < cards.evidence.sources.length; si++) {
+          var src = cards.evidence.sources[si] || {};
+          lines.push("- " + (src.title ? (src.title + "：") : "") + (src.url || ""));
+        }
+        lines.push("");
+      }
+      return lines.join("\n");
     };
 
 // ===== 20-icon.js =====
@@ -1211,10 +1635,62 @@ window.__ModuleLoader__.load({
         // 知识库条目按钮与全文阅读抽屉
         ".sy-kb-btn{appearance:none;display:block;width:100%;text-align:left;padding:4px 8px;margin:2px -8px;border:0;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:11px;line-height:1.5;cursor:pointer}",
         ".sy-kb-btn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}",
-        ".sy-kb-drawer{position:absolute;top:0;right:0;bottom:0;width:min(560px,92%);z-index:4;display:flex;flex-direction:column;background:var(--dsw-alias-bg-base);border-left:1px solid var(--dsw-alias-border-l1)}",
+        ".sy-kb-drawer{position:absolute;top:0;right:0;bottom:0;width:min(600px,94%);z-index:4;display:flex;flex-direction:column;background:var(--dsw-alias-bg-base);border-left:1px solid var(--dsw-alias-border-l1)}",
         ".sy-kb-drawer-head{flex:none;display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}",
         ".sy-kb-drawer-title{margin:0;font-size:13px;font-weight:600;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-        ".sy-kb-drawer-body{flex:1 1 auto;overflow:auto;padding:16px 24px;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.7;color:var(--dsw-alias-label-primary)}",
+        ".sy-kb-drawer-meta{flex:none;display:flex;flex-wrap:wrap;gap:6px;padding:8px 24px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}",
+        ".sy-kb-drawer-body{flex:1 1 auto;overflow:auto;padding:16px 24px;word-break:break-word;font-size:13px;line-height:1.7;color:var(--dsw-alias-label-primary)}",
+
+        // 健康状态警报条（缺二进制/MCP未连接时强提示）
+        ".sy-health-alert{margin:12px 24px 0;padding:12px 16px;border-radius:8px;border:1px solid var(--dsw-alias-state-error-primary);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}",
+        ".sy-health-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}",
+        ".sy-health-title{font-size:13px;font-weight:600;color:var(--dsw-alias-state-error-primary)}",
+        ".sy-health-cmd{display:inline-block;margin-top:4px;padding:3px 8px;border-radius:6px;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l1);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--dsw-alias-label-primary)}",
+
+        // 新手引导与示例任务卡
+        ".sy-guide{padding:24px;max-width:840px;margin:0 auto}",
+        ".sy-guide-hero{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:16px 20px;background:var(--dsw-alias-bg-layer-1);margin-bottom:16px}",
+        ".sy-guide-hero h2{margin:0 0 8px;font-size:16px;font-weight:600}",
+        ".sy-guide-hero p{margin:0;font-size:13px;line-height:1.6;color:var(--dsw-alias-label-secondary)}",
+        ".sy-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:16px 0}",
+        ".sy-step-card{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:12px 14px;background:var(--dsw-alias-bg-base)}",
+        ".sy-step-num{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:999px;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-foreground);font-size:11px;font-weight:600;margin-right:8px}",
+        ".sy-examples{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:8px}",
+        ".sy-ex-card{appearance:none;text-align:left;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:12px 14px;background:var(--dsw-alias-bg-layer-1);color:inherit;font:inherit;cursor:pointer;display:flex;flex-direction:column;gap:6px}",
+        ".sy-ex-card:hover{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-interactive-bg-hover)}",
+        ".sy-ex-title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary)}",
+        ".sy-ex-hint{font-size:12px;color:var(--dsw-alias-label-secondary);line-height:1.5}",
+
+        // 白话结论卡与导出工具条
+        ".sy-conclusion{border:1px solid var(--dsw-alias-brand-primary);border-radius:8px;padding:16px;background:var(--dsw-alias-bg-layer-1);margin-bottom:16px}",
+        ".sy-conclusion-hl{margin:0 0 10px;font-size:15px;font-weight:600;line-height:1.5;color:var(--dsw-alias-label-primary)}",
+        ".sy-act-list{margin:8px 0;padding-left:20px;font-size:13px;line-height:1.65}",
+        ".sy-act-why{color:var(--dsw-alias-label-secondary);font-size:12px;margin-top:2px}",
+        ".sy-toolbar-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}",
+
+        // 成本精算与内联知识库网格
+        ".sy-cost-card{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:16px;background:var(--dsw-alias-bg-layer-1);margin-bottom:16px}",
+        ".sy-missing-val{color:var(--dsw-alias-state-warn-primary);font-weight:600}",
+        ".sy-kb-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px}",
+        ".sy-kb-search{flex:1 1 220px;min-width:180px;height:32px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base);color:inherit;font:inherit;font-size:12px}",
+        ".sy-kb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}",
+        ".sy-kb-card{appearance:none;text-align:left;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:12px 14px;background:var(--dsw-alias-bg-layer-1);color:inherit;font:inherit;cursor:pointer;display:flex;flex-direction:column;gap:6px}",
+        ".sy-kb-card:hover{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-interactive-bg-hover)}",
+
+        // 安全 Markdown 排版（纯 React 节点渲染）
+        ".sy-md h1,.sy-md h2,.sy-md h3,.sy-md h4{margin:16px 0 8px;font-weight:600;line-height:1.4;color:var(--dsw-alias-label-primary)}",
+        ".sy-md h1{font-size:17px;border-bottom:1px solid var(--dsw-alias-border-l1);padding-bottom:6px}",
+        ".sy-md h2{font-size:15px}",
+        ".sy-md h3{font-size:13px}",
+        ".sy-md p{margin:8px 0;font-size:13px;line-height:1.7}",
+        ".sy-md ul,.sy-md ol{margin:8px 0;padding-left:22px;font-size:13px;line-height:1.7}",
+        ".sy-md blockquote{margin:10px 0;padding:8px 12px;border-left:3px solid var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:0 8px 8px 0}",
+        ".sy-md pre{margin:10px 0;padding:10px 12px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.55}",
+        ".sy-md code{padding:1px 5px;border-radius:4px;background:var(--dsw-alias-bg-layer-2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}",
+        ".sy-md pre code{padding:0;background:transparent}",
+        ".sy-md hr{border:0;border-top:1px solid var(--dsw-alias-border-l1);margin:14px 0}",
+        ".sy-md a{color:var(--dsw-alias-brand-primary);text-decoration:underline}",
+        ".sy-md-wiki{appearance:none;border:0;border-bottom:1px dashed var(--dsw-alias-brand-primary);padding:0 2px;background:transparent;color:var(--dsw-alias-brand-primary);font:inherit;cursor:pointer}",
 
         // 标签
         ".sy-tag{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:8px;font-size:11px;border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;white-space:nowrap}",
@@ -1230,6 +1706,14 @@ window.__ModuleLoader__.load({
         ".sy-wb-right{display:none}",
         ".sy-insp-toggle{display:inline-flex}",
         ".sy-wb-right.is-open{display:block;position:absolute;top:0;right:0;bottom:0;width:272px;z-index:3;box-shadow:0 0 0 1px var(--dsw-alias-border-l1)}",
+        "}",
+
+        // 打印 / 另存 PDF 排版
+        "@media print{",
+        ".sy-wb{height:auto;overflow:visible}",
+        ".sy-wb-head,.sy-wb-left,.sy-wb-right,.sy-tabs,.sy-btn,.sy-kb-drawer{display:none!important}",
+        ".sy-wb-body{display:block!important;overflow:visible}",
+        ".sy-wb-center,.sy-content{overflow:visible!important;height:auto!important;padding:0!important}",
         "}"
     ].join("\n");
 
@@ -1241,11 +1725,19 @@ window.__ModuleLoader__.load({
     var SYView = {};
 
     var TAB_DEFS = [
-      { id: "overview", label: "概览", icon: "弈" },
-      { id: "matrix", label: "矩阵", icon: "算" },
-      { id: "equilibrium", label: "均衡", icon: "判" },
-      { id: "trail", label: "轨迹", icon: "证" }
+      { id: "overview", label: "总览", icon: "档" },
+      { id: "simulation", label: "推演", icon: "弈" },
+      { id: "costs", label: "精算", icon: "算" },
+      { id: "assumptions", label: "假设", icon: "判" },
+      { id: "evidence", label: "证据", icon: "证" },
+      { id: "kb", label: "知识库", icon: "知" }
     ];
+
+    function normalizeTabId(tab) {
+      if (tab === "matrix" || tab === "equilibrium") return "simulation";
+      if (tab === "trail") return "evidence";
+      return tab || "overview";
+    }
 
     /** 小工具：把可能为 undefined 的东西显示成「—」。 */
     function orDash(v) {
@@ -1371,6 +1863,7 @@ window.__ModuleLoader__.load({
     };
 
     SYView.tabs = function (vm) {
+      var active = normalizeTabId(vm.tab);
       return h("div", { className: "sy-tabs", role: "tablist", "aria-label": "案例视图" },
         TAB_DEFS.map(function (t) {
           return h("button", {
@@ -1378,7 +1871,7 @@ window.__ModuleLoader__.load({
             type: "button",
             role: "tab",
             className: "sy-tab",
-            "aria-selected": vm.tab === t.id ? "true" : "false",
+            "aria-selected": active === t.id ? "true" : "false",
             onClick: function () { vm.actions.setTab(t.id); }
           },
             h(Icon, { name: t.icon, size: 14 }),
@@ -1456,14 +1949,88 @@ window.__ModuleLoader__.load({
             }, "驳回修订"))));
     };
 
-    // ── 概览 ──
+    // ── 总览（白话结论 · 下一步行动 · 产物总览 · 报告导出） ──
     SYView.overview = function (vm) {
       var cards = vm.cards.data;
       var m = cards.meta;
       var chain = SYData.phaseChain(cards);
       var current = chain.length ? chain[chain.length - 1] : null;
+      var conc = cards.conclusion || {};
+      var rec = conc.recommend;
+      var scopeDetail = cards.scopeDetail || {};
+      var cond = scopeDetail.conditional;
+      var costs = cards.costs || { scenarios: [] };
+      var assum = cards.assumptions || { params: [], gaps: [] };
+
+      var conclusionCard = null;
+      if (conc.hasExploratoryOnly) {
+        conclusionCard = h("div", { className: "sy-cp-card", role: "alert" },
+          h("div", { className: "sy-cp-head" },
+            h(Icon, { name: "证", size: 16 }),
+            h("h3", { className: "sy-cp-title" }, "当前仅有探索性沙箱试算，尚无确定性正式结论")),
+          h("div", { className: "sy-note" },
+            "日志中仅包含 `sandbox_exec`（TrustLevel::Exploratory）调用。依据铁律 1，沙箱数字已隔离排除，不得作为正式决策结论或报告依据。"));
+      } else if (conc.headline || rec || cond || (conc.reportModel && conc.reportModel.sections)) {
+        conclusionCard = h("section", { className: "sy-conclusion", "aria-label": "核心结论与行动建议" },
+          h("div", { className: "sy-cp-head" },
+            h(Icon, { name: "档", size: 16 }),
+            h("h3", { className: "sy-cp-title" }, "白话结论与下一步"),
+            m.scope ? h(SYView.Tag, { tone: "ok" }, SYData.scopeLabel(m.scope)) : null,
+            cond ? h(SYView.Tag, { tone: "warn" }, "条件交付") : null),
+          conc.headline ? h("p", { className: "sy-conclusion-hl" }, conc.headline) : null,
+          rec && Array.isArray(rec.actions) && rec.actions.length
+            ? h("div", null,
+                h("strong", { style: { fontSize: "12px" } }, "建议推进动作"),
+                h("ol", { className: "sy-act-list" }, rec.actions.map(function (a, i) {
+                  return h("li", { key: "act" + i },
+                    h("span", null, (a && a.action) || String(a || "")),
+                    a && a.rationale ? h("div", { className: "sy-act-why" }, "依据：" + a.rationale) : null);
+                })))
+            : null,
+          rec && Array.isArray(rec.do_not) && rec.do_not.length
+            ? h("div", { style: { marginTop: "8px" } },
+                h("strong", { style: { fontSize: "12px", color: "var(--dsw-alias-state-error-primary)" } }, "明确不建议（底线避坑）"),
+                h("ul", { className: "sy-act-list" }, rec.do_not.map(function (d, i) {
+                  return h("li", { key: "dn" + i }, d);
+                })))
+            : null,
+          cond && Array.isArray(cond.decision_conditions) && cond.decision_conditions.length
+            ? h("div", { style: { marginTop: "8px" } },
+                h("strong", { style: { fontSize: "12px", color: "var(--dsw-alias-state-warn-primary)" } }, "条件交付边界与补证动作"),
+                h("ul", { className: "sy-act-list" },
+                  cond.decision_conditions.map(function (c, i) { return h("li", { key: "cc" + i }, "前提条件：" + c); })
+                    .concat((cond.information_actions || []).map(function (ia, j) { return h("li", { key: "ia" + j }, "待补证据：" + ia); }))))
+            : null,
+          h("div", { className: "sy-toolbar-row" },
+            h("button", {
+              type: "button",
+              className: "sy-btn is-primary",
+              onClick: function () { if (vm.actions && vm.actions.exportReport) vm.actions.exportReport(); }
+            }, "导出 Markdown 报告"),
+            h("button", {
+              type: "button",
+              className: "sy-btn",
+              onClick: function () { if (vm.actions && vm.actions.printReport) vm.actions.printReport(); }
+            }, "打印 / 另存 PDF")));
+      }
+
+      var exportFallback = !conclusionCard && conc.hasEngineResult
+        ? h("div", { className: "sy-sec", style: { display: "flex", gap: "8px", flexWrap: "wrap" } },
+            h("button", {
+              type: "button",
+              className: "sy-btn is-primary",
+              onClick: function () { if (vm.actions && vm.actions.exportReport) vm.actions.exportReport(); }
+            }, "导出已产出引擎成果（Markdown）"),
+            h("button", {
+              type: "button",
+              className: "sy-btn",
+              onClick: function () { if (vm.actions && vm.actions.printReport) vm.actions.printReport(); }
+            }, "打印 / 另存 PDF"))
+        : null;
+
       return h("div", null,
         SYView.checkpointCard(vm),
+        conclusionCard || exportFallback,
         h("div", { className: "sy-sec" },
           h("div", { className: "sy-sec-h" }, "阶段链",
             current ? h("span", { className: "sy-tag is-ok", style: { marginLeft: "8px" } }, "当前：" + current.label) : null),
@@ -1474,16 +2041,18 @@ window.__ModuleLoader__.load({
           h("div", { className: "sy-stat" }, h("div", { className: "sy-k" }, "工具调用"), h("div", { className: "sy-v" }, SYData.fmtNum(m.tools))),
           h("div", { className: "sy-stat" }, h("div", { className: "sy-k" }, "token（输入+输出）"), h("div", { className: "sy-v" }, SYData.fmtNum(m.tokens)))),
         h("div", { className: "sy-sec" },
-          h("div", { className: "sy-sec-h" }, "产物"),
+          h("div", { className: "sy-sec-h" }, "六大业务面板覆盖情况"),
           h("div", { className: "sy-kv" },
             h("span", null, "支付矩阵 ", cards.matrix ? h("b", null, "有") : h("b", null, "无")),
             h("span", null, "均衡 ", (cards.solve && cards.solve.equilibria && cards.solve.equilibria.length ? h("b", null, cards.solve.equilibria.length + " 个") : h("b", null, "无"))),
             h("span", null, "选择分布 ", (cards.selection && cards.selection.entries && cards.selection.entries.length ? h("b", null, "有") : h("b", null, "无"))),
+            h("span", null, "成本方案 ", h("b", null, costs.scenarios.length ? (costs.scenarios.length + " 个") : "无")),
+            h("span", null, "假设参数 ", h("b", null, assum.params.length ? (assum.params.length + " 项") : "无")),
             h("span", null, "确认点 ", (m.checkpoints.length ? h("b", null, m.checkpoints.length + " 个") : h("b", null, "无"))))),
         h("div", { className: "sy-sec" },
-          h("div", { className: "sy-sec-h" }, "说明"),
+          h("div", { className: "sy-sec-h" }, "口径说明"),
           h("div", { className: "sy-note" },
-            "本页全部数字来自商奕案例日志（case.jsonl）的只读投影：前端只展示，不重算、不估算。日志行数 ",
+            "本页全部数字来自商奕案例日志（case.jsonl）的只读投影：前端只展示，不重算、不估算、不把缺失项补 0。日志行数 ",
             SYData.fmtNum(m.events),
             cards.source && cards.source.badLines > 0 ? "，坏行 " + SYData.fmtNum(cards.source.badLines) : "",
             "。")));
@@ -1594,11 +2163,20 @@ window.__ModuleLoader__.load({
       var rows = solve.equilibria.map(function (eq, i) {
         var p = probs[eq.id];
         var pct = typeof p === "number" ? Math.max(0, Math.min(100, Math.round(p * 100))) : null;
+        var payText = null;
+        if (Array.isArray(eq.payoffs)) {
+          payText = "[" + eq.payoffs.join(", ") + "]";
+        } else if (eq.payoffs && typeof eq.payoffs === "object") {
+          var pk = Object.keys(eq.payoffs);
+          if (pk.length) {
+            payText = pk.map(function (k) { return k + ": " + eq.payoffs[k]; }).join(" · ");
+          }
+        }
         return h("div", { className: "sy-eq", key: eq.id || i },
           h("div", { className: "sy-eq-top" },
             h("span", { className: "sy-eq-id" }, orDash(eq.id)),
             eq.kind ? h("span", { className: "sy-eq-kind" }, SYData.eqKindLabel(eq.kind)) : null,
-            Array.isArray(eq.payoffs) ? h("span", { className: "sy-eq-pay" }, "支付 [" + eq.payoffs.join(", ") + "]") : null,
+            payText ? h("span", { className: "sy-eq-pay" }, "支付 " + payText) : null,
             pct === null ? null : h("span", { className: "sy-eq-prob" }, pct + "%")),
           pct === null ? null : h("div", { className: "sy-bar", "aria-hidden": true }, h("i", { style: { width: pct + "%" } })));
       });
@@ -1613,52 +2191,611 @@ window.__ModuleLoader__.load({
           h("div", { className: "sy-note" }, SYView.confidenceText(cards.selection && cards.selection.confidence))));
     };
 
-    // ── 轨迹 ──
-    SYView.trail = function (vm) {
+    // ── 推演（支付矩阵 + 均衡与选择 + 条件后果 + 满意策略发现） ──
+    SYView.simulation = function (vm) {
+      var cards = vm.cards.data;
+      var conc = cards.conclusion || {};
+      var hasMatrix = Boolean(cards.matrix);
+      var hasEq = Boolean(cards.solve && Array.isArray(cards.solve.equilibria) && cards.solve.equilibria.length);
+      var csq = conc.consequence;
+      var disc = conc.discovery;
+
+      if (!hasMatrix && !hasEq && !csq && !disc) {
+        return SYView.matrixEmpty(vm);
+      }
+
+      var csqCard = null;
+      if (csq) {
+        var reactions = Array.isArray(csq.reactions) ? csq.reactions : [];
+        csqCard = h("div", { className: "sy-sec" },
+          h("div", { className: "sy-sec-h" }, "条件后果预测（whatif）",
+            csq.decision ? h(SYView.Tag, { tone: "ok" }, "动作：" + csq.decision) : null),
+          csq.note ? h("div", { className: "sy-note", style: { marginBottom: "8px" } }, csq.note) : null,
+          reactions.length
+            ? h("div", { className: "sy-matrix-wrap" },
+                h("table", { className: "sy-matrix" },
+                  h("thead", null, h("tr", null,
+                    h("th", { scope: "col" }, "对方角色"),
+                    h("th", { scope: "col" }, "最优反应"),
+                    h("th", { scope: "col" }, "概率/权重"))),
+                  h("tbody", null, reactions.map(function (r, idx) {
+                    return h("tr", { key: "rx" + idx },
+                      h("td", null, orDash(r.player_id || r.opponent || r.actor)),
+                      h("td", null, orDash(r.strategy || r.action || r.response)),
+                      h("td", null, typeof r.prob === "number" ? Math.round(r.prob * 100) + "%" : orDash(r.probability)));
+                  }))))
+            : null);
+      }
+
+      var discCard = null;
+      if (disc) {
+        var rep = disc.report || {};
+        var satisfied = Array.isArray(rep.satisfied) ? rep.satisfied : [];
+        var relax = Array.isArray(rep.relaxation) ? rep.relaxation : [];
+        discCard = h("div", { className: "sy-sec" },
+          h("div", { className: "sy-sec-h" }, "满意策略发现",
+            h(SYView.Tag, { tone: satisfied.length ? "ok" : "warn" }, "达标 " + satisfied.length + " 项"),
+            relax.length ? h(SYView.Tag, { tone: "mute" }, "放宽建议 " + relax.length + " 条") : null),
+          disc.note ? h("div", { className: "sy-note", style: { marginBottom: "8px" } }, disc.note) : null,
+          satisfied.length
+            ? h("ul", { className: "sy-act-list" }, satisfied.map(function (s, idx) {
+                return h("li", { key: "ds" + idx }, orDash(s.strategy_id || s.name || s.id || JSON.stringify(s)));
+              }))
+            : null,
+          relax.length
+            ? h("ul", { className: "sy-act-list" }, relax.map(function (r, idx) {
+                return h("li", { key: "dr" + idx }, "放宽方向：" + orDash(r.suggestion || r.reason || r.dimension || JSON.stringify(r)));
+              }))
+            : null);
+      }
+
+      return h("div", null,
+        hasMatrix ? SYView.matrix(vm) : null,
+        hasEq
+          ? h("div", { className: hasMatrix ? "sy-sec" : "" }, SYView.equilibrium(vm))
+          : null,
+        csqCard,
+        discCard);
+    };
+
+    // ── 精算（现金支出 vs 可退押金 vs 期间累计 vs 硬约束；缺失绝不填 0） ──
+    SYView.costs = function (vm) {
+      var cards = vm.cards.data;
+      var costs = cards.costs || { scenarios: [], constraints: [], constraintCheck: null, missingItems: [] };
+      var scenarios = costs.scenarios || [];
+      var check = costs.constraintCheck;
+      var missingItems = costs.missingItems || [];
+
+      if (!scenarios.length && !(costs.constraints && costs.constraints.length) && !check) {
+        return h(SYView.Empty, {
+          icon: "算",
+          iconSize: 36,
+          title: "本案例还没有成本精算台账",
+          body: "尚未调用 business_cost / constraint_check。前端不会估算或用 0 替代未知费用；请在对话中提供报价或租金条款进行确定性精算。",
+          actions: [h("button", { key: "talk", type: "button", className: "sy-btn is-primary", onClick: vm.actions.openConversation }, "去对话做费用精算")]
+        });
+      }
+
+      var constraintCard = null;
+      if (check || (costs.constraints && costs.constraints.length)) {
+        var elCount = check && Array.isArray(check.eligible_scenario_ids) ? check.eligible_scenario_ids.length : 0;
+        var cmpCount = check && Array.isArray(check.comparison_only_scenario_ids) ? check.comparison_only_scenario_ids.length : 0;
+        var unkCount = check && Array.isArray(check.unknown_scenario_ids) ? check.unknown_scenario_ids.length : 0;
+        constraintCard = h("div", { className: "sy-cost-card" },
+          h("div", { className: "sy-cp-head" },
+            h(Icon, { name: "算", size: 16 }),
+            h("h3", { className: "sy-cp-title" }, "硬约束核对与资金底线"),
+            check && typeof check.constraint_revision === "number"
+              ? h(SYView.Tag, { tone: "mute" }, "约束版本 rev." + check.constraint_revision)
+              : null,
+            check ? h(SYView.Tag, { tone: "ok" }, "通过 " + elCount) : null,
+            check && cmpCount ? h(SYView.Tag, { tone: "err" }, "超限对照 " + cmpCount) : null,
+            check && unkCount ? h(SYView.Tag, { tone: "warn" }, "未知暂不放行 " + unkCount) : null),
+          check && check.note ? h("div", { className: "sy-note" }, check.note) : null);
+      }
+
+      var missingBanner = missingItems.length
+        ? h("div", { className: "sy-cp-card", role: "alert" },
+            h("div", { className: "sy-cp-head" },
+              h(Icon, { name: "证", size: 16 }),
+              h("h3", { className: "sy-cp-title" }, "共有 " + missingItems.length + " 项金额未取得（严格不补 0）")),
+            h("ul", { className: "sy-cp-items" }, missingItems.map(function (mi, idx) {
+              return h("li", { key: "mi" + idx },
+                h("strong", null, mi.scenario + " · " + mi.item),
+                "：",
+                h("span", { className: "sy-missing-val" }, "未取得"),
+                "（" + mi.reason + "）");
+            })))
+        : null;
+
+      var scenarioCards = scenarios.map(function (sc, idx) {
+        var cur = sc.currency || "CNY";
+        var assess = sc.constraint_assessment && sc.constraint_assessment.status;
+        var ht = sc.horizon_totals || null;
+        var items = Array.isArray(sc.items) ? sc.items : [];
+        return h("section", { className: "sy-cost-card", key: sc.scenario_id || sc.scenario || idx },
+          h("div", { className: "sy-cp-head" },
+            h("h3", { className: "sy-cp-title" }, sc.scenario || sc.scenario_id || ("方案 " + (idx + 1))),
+            h(SYView.Tag, { tone: sc.costs_complete && sc.amounts_complete !== false ? "ok" : "warn" },
+              sc.costs_complete && sc.amounts_complete !== false ? "清单完整" : "含未取得/未完备项"),
+            assess ? h(SYView.Tag, { tone: assess === "eligible" ? "ok" : assess === "ineligible" ? "err" : "warn" },
+              assess === "eligible" ? "满足约束" : assess === "ineligible" ? "超约束·仅对照" : "约束核对未知") : null),
+          h("div", { className: "sy-stats" },
+            h("div", { className: "sy-stat" },
+              h("div", { className: "sy-k" }, "期初现金总需求（含押金）"),
+              h("div", { className: "sy-v", style: { fontSize: "15px" } }, SYData.fmtCostValue(sc.listed_upfront_cash, cur))),
+            h("div", { className: "sy-stat" },
+              h("div", { className: "sy-k" }, "一次性现金支出"),
+              h("div", { className: "sy-v", style: { fontSize: "15px" } }, SYData.fmtCostValue(sc.listed_upfront_cash_expense, cur))),
+            h("div", { className: "sy-stat" },
+              h("div", { className: "sy-k" }, "可退押金（占压资金）"),
+              h("div", { className: "sy-v", style: { fontSize: "15px" } }, SYData.fmtCostValue(sc.listed_refundable_deposits, cur))),
+            h("div", { className: "sy-stat" },
+              h("div", { className: "sy-k" }, "月固定现金支出"),
+              h("div", { className: "sy-v", style: { fontSize: "15px" } }, SYData.fmtCostValue(sc.listed_monthly_fixed_cost, cur)))),
+          ht ? h("div", { className: "sy-kv", style: { marginTop: "12px" } },
+            h("span", null, "测算周期 ", h("b", null, ht.months + " 个月")),
+            h("span", null, "期间现金费用 ", h("b", null, SYData.fmtCostValue(ht.listed_cash_expense, cur))),
+            h("span", null, "期间付款累计（未扣退押） ", h("b", null, SYData.fmtCostValue(ht.listed_cash_outflow_before_deposit_return, cur))),
+            typeof sc.cash_after_listed_upfront === "number"
+              ? h("span", null, "扣除已知期初后余钱 ", h("b", null, SYData.fmtCostValue(sc.cash_after_listed_upfront, cur)))
+              : null)
+            : null,
+          items.length
+            ? h("div", { className: "sy-matrix-wrap", style: { marginTop: "12px" } },
+                h("table", { className: "sy-matrix" },
+                  h("thead", null, h("tr", null,
+                    h("th", { scope: "col" }, "费用项目"),
+                    h("th", { scope: "col" }, "性质分类"),
+                    h("th", { scope: "col" }, "周期"),
+                    h("th", { scope: "col" }, "标准化金额"),
+                    h("th", { scope: "col" }, "来源"),
+                    h("th", { scope: "col" }, "缺项说明"))),
+                  h("tbody", null, items.map(function (it, ii) {
+                    var isMissing = it.normalized_amount === null || it.normalized_amount === undefined;
+                    return h("tr", { key: "ci" + ii },
+                      h("td", null, orDash(it.name)),
+                      h("td", null, SYData.costTreatmentLabel(it.treatment)),
+                      h("td", null, SYData.periodLabel(it.normalized_period)),
+                      h("td", null, isMissing
+                        ? h("span", { className: "sy-missing-val" }, "未取得")
+                        : SYData.fmtCostValue(it.normalized_amount, cur)),
+                      h("td", null, orDash(it.source)),
+                      h("td", null, orDash(it.missing_amount_reason)));
+                  }))))
+            : null,
+          sc.note ? h("div", { className: "sy-note", style: { marginTop: "8px" } }, sc.note) : null);
+      });
+
+      return h("div", { style: { marginTop: "8px" } },
+        constraintCard,
+        missingBanner,
+        scenarioCards);
+    };
+
+    // ── 假设（参与方 · 四类证据来源徽标 · 未确认缺口） ──
+    SYView.assumptions = function (vm) {
+      var cards = vm.cards.data;
+      var assum = cards.assumptions || { players: [], params: [], counts: {}, gaps: [] };
+      var players = assum.players || [];
+      var params = assum.params || [];
+      var counts = assum.counts || {};
+      var gaps = assum.gaps || [];
+
+      if (!players.length && !params.length && !gaps.length) {
+        return h(SYView.Empty, {
+          icon: "判",
+          iconSize: 36,
+          title: "暂无形式化参数与假设记录",
+          body: "本案例尚未调用 gamespec_build 登记参与者与参数证据来源，且无成本未核项缺口。",
+          actions: [h("button", { key: "talk", type: "button", className: "sy-btn is-primary", onClick: vm.actions.openConversation }, "回对话完善模型")]
+        });
+      }
+
+      var confirmedCount = (counts.user_confirmed || 0) + (counts.confirmed_assumption || 0);
+      var countTags = h("div", { className: "sy-cp-head", style: { marginTop: "8px" } },
+        h(SYView.Tag, { tone: "ok" }, "用户确认 " + confirmedCount),
+        h(SYView.Tag, { tone: "ok" }, "公开数据 " + (counts.public_data || 0)),
+        h(SYView.Tag, { tone: counts.industry_prior ? "warn" : "mute" }, "行业先验 " + (counts.industry_prior || 0)),
+        h(SYView.Tag, { tone: (counts.assumed || 0) + (counts.unknown || 0) > 0 ? "err" : "mute" },
+          "未确认假设 " + ((counts.assumed || 0) + (counts.unknown || 0))),
+        counts.derived ? h(SYView.Tag, { tone: "mute" }, "引擎派生 " + counts.derived) : null);
+
+      return h("div", { style: { marginTop: "8px" } },
+        countTags,
+        gaps.length
+          ? h("div", { className: "sy-cp-card", role: "alert" },
+              h("div", { className: "sy-cp-head" },
+                h(Icon, { name: "判", size: 16 }),
+                h("h3", { className: "sy-cp-title" }, "待核清假设与证据缺口（铁律 2）")),
+              h("ul", { className: "sy-cp-items" }, gaps.map(function (g, i) {
+                return h("li", { key: "gp" + i }, g);
+              })))
+          : null,
+        players.length
+          ? h("div", { className: "sy-sec" },
+              h("div", { className: "sy-sec-h" }, "参与方与价值网角色", h(SYView.Tag, { tone: "mute" }, players.length + " 方")),
+              h("div", { className: "sy-matrix-wrap" },
+                h("table", { className: "sy-matrix" },
+                  h("thead", null, h("tr", null,
+                    h("th", { scope: "col" }, "参与方"),
+                    h("th", { scope: "col" }, "标识"),
+                    h("th", { scope: "col" }, "价值网角色"),
+                    h("th", { scope: "col" }, "博弈关系"))),
+                  h("tbody", null, players.map(function (pl, pi) {
+                    return h("tr", { key: "pl" + pi },
+                      h("td", null, orDash(pl.name)),
+                      h("td", null, orDash(pl.id)),
+                      h("td", null, orDash(pl.vnRole)),
+                      h("td", null, orDash(pl.relation)));
+                  })))))
+          : null,
+        params.length
+          ? h("div", { className: "sy-sec" },
+              h("div", { className: "sy-sec-h" }, "参数证据台账", h(SYView.Tag, { tone: "mute" }, params.length + " 项")),
+              h("div", { className: "sy-matrix-wrap" },
+                h("table", { className: "sy-matrix" },
+                  h("thead", null, h("tr", null,
+                    h("th", { scope: "col" }, "参数"),
+                    h("th", { scope: "col" }, "值 / 范围"),
+                    h("th", { scope: "col" }, "单位"),
+                    h("th", { scope: "col" }, "四类证据来源"),
+                    h("th", { scope: "col" }, "来源凭据 / 说明"))),
+                  h("tbody", null, params.map(function (p, i) {
+                    return h("tr", { key: p.key || i },
+                      h("td", null, orDash(p.name), p.name && p.key && p.name !== p.key ? h("div", { className: "sy-note" }, p.key) : null),
+                      h("td", null, orDash(p.valueText)),
+                      h("td", null, orDash(p.unit)),
+                      h("td", null, h(SYView.Tag, { tone: SYData.paramSourceTone(p.sourceKind) }, SYData.paramSourceLabel(p.sourceKind))),
+                      h("td", null, orDash(p.sourceDetail)));
+                  })))))
+          : null);
+    };
+
+    // ── 证据（人工确认 · POI/调研实证 · 公开检索 · 探索性工具隔离 · 工具/阶段轨迹） ──
+    SYView.evidence = function (vm) {
       var cards = vm.cards.data;
       var m = cards.meta;
-      var items = [];
+      var ev = cards.evidence || {};
+      var checkpoints = (ev.checkpoints && ev.checkpoints.length)
+        ? ev.checkpoints
+        : (m.checkpoints || []).map(function (id) {
+            return { id: id, status: "answered", answers: ["checkpoint_answered"], actor: null };
+          });
+      var sources = ev.sources || [];
+      var pois = ev.poiSurveys || [];
+      var records = ev.researchRecords || [];
+      var tools = ev.tools || [];
+      var fails = cards.failures || [];
       var phases = m.phases || [];
+
+      var exploratoryBanner = ev.exploratoryCalls > 0
+        ? h("div", { className: "sy-cp-card", role: "alert" },
+            h("div", { className: "sy-cp-head" },
+              h(Icon, { name: "证", size: 16 }),
+              h("h3", { className: "sy-cp-title" }, "探索性沙箱隔离（sandbox_exec × " + ev.exploratoryCalls + "）")),
+            h("div", { className: "sy-note" },
+              "以上沙箱试算属于 TrustLevel::Exploratory，已按铁律 1 彻底隔离，未写入正式支付矩阵、成本、结论或报告数字。"))
+        : null;
+
+      var cpSection = h("div", { className: "sy-sec" },
+        h("div", { className: "sy-sec-h" }, "人类决策关口审计记录",
+          h(SYView.Tag, { tone: "mute" }, checkpoints.length + " 次")),
+        checkpoints.length
+          ? checkpoints.map(function (cp, i) {
+              var stTone = cp.status === "answered" ? "ok" : cp.status === "pending" ? "warn" : "mute";
+              var stLabel = cp.status === "answered" ? "已核准/答复" : cp.status === "pending" ? "待真人确认" : "已被替代";
+              return h("div", { className: "sy-eq", key: "ecp" + i },
+                h("div", { className: "sy-eq-top" },
+                  h("span", { className: "sy-eq-id" }, SYData.checkpointLabel(cp.id)),
+                  h(SYView.Tag, { tone: stTone }, stLabel),
+                  cp.actor ? h(SYView.Tag, { tone: "mute" }, "actor=" + cp.actor) : null,
+                  cp.answeredAt || cp.openedAt ? h("span", { className: "sy-eq-prob" }, SYData.fmtTime(cp.answeredAt || cp.openedAt)) : null),
+                cp.answers && cp.answers.length
+                  ? h("div", { className: "sy-note", style: { marginTop: "6px" } }, "答复：" + cp.answers.join(" | "))
+                  : null);
+            })
+          : h("div", { className: "sy-note" }, "暂无人类关口记录。"));
+
+      var srcSection = sources.length
+        ? h("div", { className: "sy-sec" },
+            h("div", { className: "sy-sec-h" }, "公开检索与抓取来源", h(SYView.Tag, { tone: "mute" }, sources.length + " 条")),
+            sources.map(function (s, i) {
+              var href = SYData.safeHref(s.url);
+              return h("div", { className: "sy-trail-item", key: "src" + i },
+                h("div", { className: "sy-trail-when" }, orDash(s.tool)),
+                h("div", { className: "sy-trail-body" },
+                  h("div", { className: "sy-trail-tool" },
+                    href
+                      ? h("a", { href: href, target: "_blank", rel: "noopener noreferrer" }, s.title || s.url)
+                      : orDash(s.title || s.url)),
+                  s.snippet ? h("div", { className: "sy-trail-detail" }, s.snippet) : null,
+                  s.title && s.url ? h("div", { className: "sy-note" }, s.url) : null));
+            }))
+        : null;
+
+      var fieldSection = (pois.length || records.length)
+        ? h("div", { className: "sy-sec" },
+            h("div", { className: "sy-sec-h" }, "商圈 POI 与门店实地凭据",
+              h(SYView.Tag, { tone: "mute" }, "POI " + pois.length + " · 凭据 " + records.length)),
+            pois.map(function (p, i) {
+              return h("div", { className: "sy-trail-item", key: "poi" + i },
+                h("div", { className: "sy-trail-when" }, "POI 计数"),
+                h("div", { className: "sy-trail-body" },
+                  h("div", { className: "sy-trail-tool" }, orDash(p.address || p.query || "周边统计")),
+                  h("div", { className: "sy-trail-detail" }, JSON.stringify(p))));
+            }),
+            records.map(function (r, i) {
+              return h("div", { className: "sy-trail-item", key: "rec" + i },
+                h("div", { className: "sy-trail-when" }, "门店凭据"),
+                h("div", { className: "sy-trail-body" },
+                  h("div", { className: "sy-trail-detail" }, JSON.stringify(r))));
+            }))
+        : null;
+
+      var trailItems = [];
       for (var i = 0; i < phases.length; i++) {
-        items.push(h("div", { className: "sy-trail-item", key: "p" + i },
+        trailItems.push(h("div", { className: "sy-trail-item", key: "p" + i },
           h("div", { className: "sy-trail-when" }, "阶段 " + (i + 1)),
           h("div", { className: "sy-trail-body" },
             h("div", { className: "sy-trail-tool" }, SYData.phaseLabel(phases[i])),
             h("div", { className: "sy-trail-detail" }, phases[i]))));
       }
-      var cps = m.checkpoints || [];
-      for (var j = 0; j < cps.length; j++) {
-        items.push(h("div", { className: "sy-trail-item", key: "c" + j },
-          h("div", { className: "sy-trail-when" }, "确认点 " + (j + 1)),
+      for (var t = tools.length - 1; t >= 0 && trailItems.length < 40; t--) {
+        var tl = tools[t] || {};
+        trailItems.push(h("div", { className: "sy-trail-item", key: "tl" + t },
+          h("div", { className: "sy-trail-when" }, SYData.toolStatusLabel(tl.status)),
           h("div", { className: "sy-trail-body" },
-            h("div", { className: "sy-trail-tool" }, SYData.checkpointLabel(cps[j])),
-            h("div", { className: "sy-trail-detail" }, "已答复（checkpoint_answered）"))));
+            h("div", { className: "sy-trail-tool" },
+              orDash(tl.name),
+              tl.exploratory ? h(SYView.Tag, { tone: "warn", }, "Exploratory 已隔离") : null),
+            tl.detail ? h("div", { className: "sy-trail-detail" }, tl.detail) : null)));
       }
-      var fails = cards.failures || [];
-      for (var k = 0; k < fails.length; k++) {
-        var f = fails[k] || {};
-        items.push(h("div", { className: "sy-trail-item", key: "f" + k },
-          h("div", { className: "sy-trail-when" }, "失败"),
-          h("div", { className: "sy-trail-body" },
-            h("div", { className: "sy-trail-tool" }, orDash(f.tool)),
-            h("div", { className: "sy-trail-detail" }, SYData.toolStatusLabel(f.status) + " · " + orDash(f.detail)))));
+      if (!tools.length) {
+        for (var k = 0; k < fails.length; k++) {
+          var f = fails[k] || {};
+          trailItems.push(h("div", { className: "sy-trail-item", key: "f" + k },
+            h("div", { className: "sy-trail-when" }, "失败"),
+            h("div", { className: "sy-trail-body" },
+              h("div", { className: "sy-trail-tool" }, orDash(f.tool)),
+              h("div", { className: "sy-trail-detail" }, SYData.toolStatusLabel(f.status) + " · " + orDash(f.detail)))));
+        }
       }
+
       return h("div", null,
-        h("div", { className: "sy-sec-h", style: { marginTop: "8px" } },
-          "轨迹",
-          h("span", { className: "sy-tag is-mute" }, phases.length + " 阶段"),
-          h("span", { className: "sy-tag is-mute" }, cps.length + " 确认点"),
-          fails.length ? h("span", { className: "sy-tag is-err" }, fails.length + " 失败") : null),
-        items.length
-          ? h("div", null, items)
-          : h(SYView.Empty, {
-            icon: "证",
-            iconSize: 36,
-            title: "没有可展示的轨迹事件",
-            body: "这份日志里没有 phase_entered / checkpoint_answered / 失败调用记录。"
-          }),
+        exploratoryBanner,
+        cpSection,
+        srcSection,
+        fieldSection,
         h("div", { className: "sy-sec" },
-          h("div", { className: "sy-note" }, "来源：" + orDash(cards.source.path))));
+          h("div", { className: "sy-sec-h" },
+            "阶段与工具审计轨迹",
+            h("span", { className: "sy-tag is-mute" }, phases.length + " 阶段"),
+            h("span", { className: "sy-tag is-mute" }, tools.length + " 调用"),
+            fails.length ? h("span", { className: "sy-tag is-err" }, fails.length + " 失败") : null),
+          trailItems.length
+            ? h("div", null, trailItems)
+            : h("div", { className: "sy-note" }, "暂无阶段或工具审计事件。"),
+          h("div", { className: "sy-sec" },
+            h("div", { className: "sy-note" }, "日志源文件：" + orDash(cards.source.path)))));
+    };
+
+    SYView.trail = SYView.evidence;
+
+    // ── 安全纯 React Markdown 渲染（零 dangerouslySetInnerHTML，剥离 YAML front-matter，支持 [[wiki-link]]） ──
+    SYView.renderInline = function (text, keyPrefix, onOpenWiki) {
+      var tokens = SYData.parseInlineTokens(text);
+      return tokens.map(function (tok, idx) {
+        var key = keyPrefix + "-" + idx;
+        if (tok.type === "bold") return h("strong", { key: key }, tok.text);
+        if (tok.type === "code") return h("code", { key: key }, tok.text);
+        if (tok.type === "link") {
+          return h("a", { key: key, href: tok.href, target: "_blank", rel: "noopener noreferrer" }, tok.text);
+        }
+        if (tok.type === "wiki") {
+          return h("button", {
+            key: key,
+            type: "button",
+            className: "sy-md-wiki",
+            title: "跳转到知识条目：" + tok.target,
+            onClick: function () { if (onOpenWiki) onOpenWiki(tok.target); }
+          }, tok.label);
+        }
+        return tok.text;
+      });
+    };
+
+    SYView.Markdown = function (props) {
+      var parsed = SYData.parseFrontMatterAndBody(props.markdown || "");
+      var meta = parsed.meta || {};
+      var blocks = SYData.parseMarkdownBlocks(parsed.body);
+      var chips = [];
+      if (meta.kind) chips.push(h(SYView.Tag, { key: "mk", tone: "ok" }, SYData.KB_KIND_LABELS[meta.kind] || meta.kind));
+      if (meta.id) chips.push(h(SYView.Tag, { key: "mi", tone: "mute" }, "ID " + meta.id));
+      if (meta.tags) chips.push(h(SYView.Tag, { key: "mt", tone: "mute" }, meta.tags));
+
+      var rendered = blocks.map(function (b, idx) {
+        var kp = "mb" + idx;
+        if (b.type === "heading") {
+          var tag = b.level === 1 ? "h1" : b.level === 2 ? "h2" : b.level === 3 ? "h3" : "h4";
+          return h(tag, { key: kp }, SYView.renderInline(b.text, kp, props.onOpenWiki));
+        }
+        if (b.type === "code") {
+          return h("pre", { key: kp }, h("code", null, b.text));
+        }
+        if (b.type === "hr") return h("hr", { key: kp });
+        if (b.type === "quote") {
+          return h("blockquote", { key: kp }, SYView.renderInline(b.text, kp, props.onOpenWiki));
+        }
+        if (b.type === "ul") {
+          return h("ul", { key: kp }, b.items.map(function (it, li) {
+            return h("li", { key: kp + "u" + li }, SYView.renderInline(it, kp + "u" + li, props.onOpenWiki));
+          }));
+        }
+        if (b.type === "ol") {
+          return h("ol", { key: kp }, b.items.map(function (it, li) {
+            return h("li", { key: kp + "o" + li }, SYView.renderInline(it, kp + "o" + li, props.onOpenWiki));
+          }));
+        }
+        if (b.type === "table") {
+          return h("div", { className: "sy-matrix-wrap", style: { margin: "10px 0" }, key: kp },
+            h("table", { className: "sy-matrix" },
+              h("thead", null, h("tr", null, b.headers.map(function (hd, hi) {
+                return h("th", { key: kp + "th" + hi, scope: "col" }, SYView.renderInline(hd, kp + "th" + hi, props.onOpenWiki));
+              }))),
+              h("tbody", null, b.rows.map(function (row, ri) {
+                return h("tr", { key: kp + "tr" + ri }, row.map(function (cell, ci) {
+                  return h("td", { key: kp + "td" + ri + "-" + ci }, SYView.renderInline(cell, kp + "td" + ri + "-" + ci, props.onOpenWiki));
+                }));
+              }))));
+        }
+        return h("p", { key: kp }, SYView.renderInline(b.text, kp, props.onOpenWiki));
+      });
+
+      return h("div", { className: "sy-md" },
+        chips.length ? h("div", { className: "sy-cp-head", style: { marginBottom: "8px" } }, chips) : null,
+        meta.summary ? h("blockquote", { key: "msum" }, meta.summary) : null,
+        rendered);
+    };
+
+    // ── 知识库页签（搜索 + 分类浏览 + 点击打开阅读抽屉） ──
+    SYView.kbTab = function (vm) {
+      var kb = vm.kb || { phase: "loading", count: 0, items: [] };
+      if (kb.phase === "loading") return h(SYView.Loading, { label: "读取本地知识库…" });
+      if (kb.phase === "error") {
+        return h(SYView.ErrorBox, { message: "知识库尚未就绪，请确认 SHANGYI_ROOT 或 host-data 服务。", onRetry: vm.actions.refresh });
+      }
+      var query = (vm.kbQuery || "").trim().toLowerCase();
+      var kind = vm.kbKind || "all";
+      var docs = (kb.items || []).filter(function (d) {
+        if (kind !== "all" && (d.group || "other") !== kind) return false;
+        if (!query) return true;
+        var hay = [d.title, d.slug, d.summary, d.id].join(" ").toLowerCase();
+        return hay.indexOf(query) >= 0;
+      });
+
+      var kinds = [
+        { id: "all", label: "全部（" + (kb.items || []).length + "）" },
+        { id: "theory", label: "核心理论" },
+        { id: "method", label: "研究方法" },
+        { id: "concept", label: "决策概念" }
+      ];
+
+      return h("div", { style: { marginTop: "8px" } },
+        h("div", { className: "sy-kb-toolbar" },
+          h("input", {
+            type: "search",
+            className: "sy-kb-search",
+            value: vm.kbQuery || "",
+            placeholder: "检索博弈理论、精算规则或研究方法…",
+            "aria-label": "检索知识库",
+            onChange: function (e) { if (vm.actions.setKbQuery) vm.actions.setKbQuery(e.target.value); }
+          }),
+          kinds.map(function (k) {
+            var active = kind === k.id;
+            return h("button", {
+              key: k.id,
+              type: "button",
+              className: active ? "sy-btn is-primary" : "sy-btn",
+              onClick: function () { if (vm.actions.setKbKind) vm.actions.setKbKind(k.id); }
+            }, k.label);
+          })),
+        docs.length
+          ? h("div", { className: "sy-kb-grid" }, docs.map(function (d, i) {
+              var slug = d.slug || "";
+              return h("button", {
+                key: slug || i,
+                type: "button",
+                className: "sy-kb-card",
+                onClick: function () { if (vm.actions.openKbDoc && slug) vm.actions.openKbDoc(slug); }
+              },
+                h("div", { className: "sy-cp-head", style: { marginBottom: "2px" } },
+                  h("span", { className: "sy-ex-title" }, d.title || slug),
+                  d.group ? h(SYView.Tag, { tone: "mute" }, SYData.KB_KIND_LABELS[d.group] || d.group) : null,
+                  d.userAdded ? h(SYView.Tag, { tone: "ok" }, "自建条目") : null),
+                d.summary ? h("div", { className: "sy-ex-hint" }, d.summary) : null,
+                h("div", { className: "sy-note" }, slug));
+            }))
+          : h(SYView.Empty, {
+              icon: "知",
+              iconSize: 36,
+              title: "没有匹配的知识库条目",
+              body: "清空搜索关键词或切换分类试试；也可以用命令 `shangyi kb add` 导入自定义 Markdown 经验条目。"
+            }));
+    };
+
+    // ── 健康告警条（缺二进制 / MCP 未连接时强提示，防止静默退化成裸 LLM 对话） ──
+    SYView.healthBanner = function (vm) {
+      var hs = vm.health;
+      if (!hs || hs.phase !== "ok" || !hs.data || hs.data.ok !== false) return null;
+      var problems = Array.isArray(hs.data.problems) ? hs.data.problems : [];
+      if (!problems.length) return null;
+      return h("div", { className: "sy-health-alert", role: "alert" },
+        problems.map(function (p, idx) {
+          var cmds = Array.isArray(p.fixCommands) ? p.fixCommands : [];
+          return h("div", { key: p.code || idx, style: idx > 0 ? { marginTop: "8px", paddingTop: "8px", borderTop: "1px solid var(--dsw-alias-border-l1)" } : null },
+            h("div", { className: "sy-health-head" },
+              h(Icon, { name: "证", size: 16 }),
+              h("span", { className: "sy-health-title" }, p.title || "商奕确定性内核未就绪"),
+              h(SYView.Tag, { tone: p.severity === "blocking" ? "err" : "warn" }, p.severity === "blocking" ? "阻断风险" : "警告"),
+              idx === 0 && vm.actions && vm.actions.refreshHealth
+                ? h("button", { type: "button", className: "sy-btn", style: { marginLeft: "auto" }, onClick: vm.actions.refreshHealth }, "重新检测")
+                : null),
+            p.detail ? h("div", { className: "sy-note", style: { color: "var(--dsw-alias-label-primary)" } }, p.detail) : null,
+            cmds.length
+              ? h("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "4px" } },
+                  cmds.map(function (cmd, ci) {
+                    return h("code", { className: "sy-health-cmd", key: "hc" + ci }, cmd);
+                  }))
+              : null);
+        }));
+    };
+
+    // ── 新手引导（输入什么 + 3 步怎么走 + 4 个可点击示例提问） ──
+    SYView.onboarding = function (vm, opts) {
+      var canClose = opts && opts.canClose;
+      var examples = SYData.ONBOARDING_EXAMPLES || [];
+      return h("div", { className: "sy-guide" },
+        h("div", { className: "sy-guide-hero" },
+          h("div", { className: "sy-cp-head" },
+            h(Icon, { name: "弈", size: 20 }),
+            h("h2", null, "欢迎使用商奕 · 商业与金融博弈决策工作台"),
+            canClose && vm.actions && vm.actions.toggleGuide
+              ? h("button", { type: "button", className: "sy-btn", style: { marginLeft: "auto" }, onClick: vm.actions.toggleGuide }, "返回当前案例")
+              : null),
+          h("p", null,
+            "不用背博弈术语。你只需要在对话面板用日常语言描述商业处境、报价清单或担忧的问题：商奕先检索公开事实，把金额交给 Rust 确定性内核精算（缺项标“未取得”，绝不估算补 0），最后再由你亲手核准关键假设并生成均衡建议与可追溯报告。")),
+        h("div", { className: "sy-steps" },
+          h("div", { className: "sy-step-card" },
+            h("div", { className: "sy-cp-head" }, h("span", { className: "sy-step-num" }, "1"), h("strong", null, "输入处境与底线")),
+            h("div", { className: "sy-ex-hint" }, "说明对手/客户关系、可用现金上限、已有报价或房租合同，未知项直接说明即可。")),
+          h("div", { className: "sy-step-card" },
+            h("div", { className: "sy-cp-head" }, h("span", { className: "sy-step-num" }, "2"), h("strong", null, "核对证据与关口")),
+            h("div", { className: "sy-ex-hint" }, "关键假设与建模前必须在关口（cp1/cp2/cp3）由你亲自核准，未确认假设绝不静默进求解器。")),
+          h("div", { className: "sy-step-card" },
+            h("div", { className: "sy-cp-head" }, h("span", { className: "sy-step-num" }, "3"), h("strong", null, "复盘六大面板与导出")),
+            h("div", { className: "sy-ex-hint" }, "总览看白话行动，推演/精算/假设/证据核实数字与依据，并一键导出 Markdown 或 PDF 报告。"))),
+        h("div", { className: "sy-sec-h" }, "点击以下任意行业示例，一键复制提问并前往对话面板"),
+        h("div", { className: "sy-examples" }, examples.map(function (ex) {
+          return h("button", {
+            key: ex.id,
+            type: "button",
+            className: "sy-ex-card",
+            onClick: function () {
+              if (vm.actions && vm.actions.useExamplePrompt) vm.actions.useExamplePrompt(ex.prompt);
+              else if (vm.actions && vm.actions.openConversation) vm.actions.openConversation();
+            }
+          },
+            h("div", { className: "sy-cp-head", style: { marginBottom: "0" } },
+              h("span", { className: "sy-ex-title" }, ex.title),
+              h(SYView.Tag, { tone: "ok" }, ex.tag)),
+            h("div", { className: "sy-ex-hint" }, ex.hint),
+            h("div", { className: "sy-note" }, "点击复制示例并去对话 →"));
+        })),
+        h("div", { className: "sy-toolbar-row", style: { marginTop: "16px" } },
+          h("button", { type: "button", className: "sy-btn is-primary", onClick: vm.actions.openConversation }, "打开对话面板自己输入"),
+          h("button", { type: "button", className: "sy-btn", onClick: function () { vm.actions.setTab("kb"); } }, "先逛逛 35 篇博弈知识库"),
+          h("button", { type: "button", className: "sy-btn", onClick: vm.actions.refresh }, "刷新案例列表")));
     };
 
     // ── 知识库全文阅读抽屉 ──
@@ -1676,7 +2813,12 @@ window.__ModuleLoader__.load({
             : null
         });
       } else if (kbDoc.data) {
-        body = kbDoc.data.markdown || "";
+        body = h(SYView.Markdown, {
+          markdown: kbDoc.data.markdown || "",
+          onOpenWiki: function (target) {
+            if (vm.actions && vm.actions.openKbDoc) vm.actions.openKbDoc(target);
+          }
+        });
       } else {
         body = "";
       }
@@ -1748,10 +2890,13 @@ window.__ModuleLoader__.load({
           : (!cards.pendingCheckpoint ? h("div", { className: "sy-note" }, "本案例没有已答复的确认点。") : null)) : null;
 
       var params = cards ? h("div", { className: "sy-insp-sec" },
-        h("h3", null, "参数"),
+        h("h3", null, "参数与证据"),
         h("div", { className: "sy-insp-row" },
           h("span", { className: "sy-k" }, "矩阵参数数"),
           h("span", { className: "sy-v" }, cards.matrix && typeof cards.matrix.params === "number" ? String(cards.matrix.params) : "—")),
+        h("div", { className: "sy-insp-row" },
+          h("span", { className: "sy-k" }, "证据缺口"),
+          h("span", { className: "sy-v" }, String(cards.assumptions && cards.assumptions.gaps ? cards.assumptions.gaps.length : 0))),
         h("div", { className: "sy-note" }, "参数终值由引擎求解；矩阵里显示为 ⟨参数⟩ 引用。")) : null;
 
       var tools = cards ? h("div", { className: "sy-insp-sec" },
@@ -1779,63 +2924,98 @@ window.__ModuleLoader__.load({
 
     // ── 中栏：状态分发 ──
     SYView.center = function (vm) {
+      var banner = SYView.healthBanner(vm);
+      var toast = vm.toastMsg
+        ? h("div", { className: "sy-status", role: "status", style: { margin: "12px 24px 0" } }, vm.toastMsg)
+        : null;
+      var activeTab = normalizeTabId(vm.tab);
+
+      if (vm.guideOpen) {
+        return h("div", { className: "sy-wb-center" },
+          banner,
+          toast,
+          h("div", { className: "sy-content" }, SYView.onboarding(vm, { canClose: vm.cases.items.length > 0 })));
+      }
+
+      if (activeTab === "kb" && !vm.selectedCaseId) {
+        return h("div", { className: "sy-wb-center" },
+          banner,
+          toast,
+          h("div", { className: "sy-casehead", style: { display: "flex", alignItems: "center", gap: "8px" } },
+            h("h2", { className: "sy-casename", style: { margin: 0, flex: "1 1 auto" } }, "商奕知识库与决策方法论"),
+            h("button", { type: "button", className: "sy-btn", onClick: function () { vm.actions.setTab("overview"); } }, "返回引导")),
+          h("div", { className: "sy-content" }, SYView.kbTab(vm)));
+      }
+
       // 列表还没回来：中栏给骨架，不要提前说「选一个案例」。
       if (vm.cases.phase === "loading" && !vm.cases.items.length) {
-        return h("div", { className: "sy-wb-center" }, h("div", { style: { padding: "24px" } },
-          h(SYView.Loading, { label: "读取案例列表…" })));
+        return h("div", { className: "sy-wb-center" },
+          banner,
+          toast,
+          h("div", { style: { padding: "24px" } }, h(SYView.Loading, { label: "读取案例列表…" })));
       }
       if (vm.cases.phase === "error" && !vm.cases.items.length) {
-        return h("div", { className: "sy-wb-center" }, h("div", { style: { padding: "24px" } },
-          h(SYView.ErrorBox, { message: "案例列表读取失败：" + (vm.cases.error || "未知错误"), onRetry: vm.actions.refresh })));
+        return h("div", { className: "sy-wb-center" },
+          banner,
+          toast,
+          h("div", { style: { padding: "24px" } },
+            h(SYView.ErrorBox, { message: "案例列表读取失败：" + (vm.cases.error || "未知错误"), onRetry: vm.actions.refresh })));
       }
       if (vm.cases.phase === "ok" && !vm.cases.items.length) {
         return h("div", { className: "sy-wb-center" },
-          h(SYView.Empty, {
-            icon: "档",
-            iconSize: 40,
-            title: "还没有案例",
-            body: "商奕把每次咨询 / 研究 / 费用测算都写成一个 case.jsonl，本页读的是 $SHANGYI_HOME/cases 下的真实日志。现在一条都没有——先去对话面板发起一次商奕任务，回来这里就有数据。",
-            actions: [
-              h("button", { key: "talk", type: "button", className: "sy-btn is-primary", onClick: vm.actions.openConversation }, "打开对话面板"),
-              h("button", { key: "refresh", type: "button", className: "sy-btn", onClick: vm.actions.refresh }, "刷新")
-            ]
-          }));
+          banner,
+          toast,
+          h("div", { className: "sy-content" }, SYView.onboarding(vm, { canClose: false })));
       }
       if (!vm.selectedCaseId) {
         return h("div", { className: "sy-wb-center" },
+          banner,
+          toast,
           h(SYView.Empty, {
             icon: "弈",
             iconSize: 36,
             title: "从左侧选一个案例",
-            body: "列表里每个案例都是一份真实 case.jsonl；选中后这里显示它的阶段链、支付矩阵、均衡与选择。",
-            actions: [h("button", {
-              key: "first", type: "button", className: "sy-btn is-primary",
-              onClick: function () {
-                var first = vm.cases.items[0];
-                if (first) vm.actions.selectCase(first.caseId);
-              }
-            }, "选中最近一个")]
+            body: "列表里每个案例都是一份真实 case.jsonl；选中后可查看六大业务模块：总览、推演、精算、假设、证据与知识库。",
+            actions: [
+              h("button", {
+                key: "first", type: "button", className: "sy-btn is-primary",
+                onClick: function () {
+                  var first = vm.cases.items[0];
+                  if (first) vm.actions.selectCase(first.caseId);
+                }
+              }, "选中最近一个"),
+              h("button", { key: "kb", type: "button", className: "sy-btn", onClick: function () { vm.actions.setTab("kb"); } }, "浏览知识库")
+            ]
           }));
       }
 
       var cardsState = vm.cards;
       if (cardsState.phase === "loading" || cardsState.phase === "idle") {
-        return h("div", { className: "sy-wb-center" }, h("div", { style: { padding: "24px" } },
-          h(SYView.Loading, { label: "读取案例日志…" })));
+        return h("div", { className: "sy-wb-center" },
+          banner,
+          toast,
+          h("div", { style: { padding: "24px" } }, h(SYView.Loading, { label: "读取案例日志…" })));
       }
       if (cardsState.phase === "error") {
-        return h("div", { className: "sy-wb-center" }, h("div", { style: { padding: "24px" } },
-          h(SYView.ErrorBox, { message: "案例数据读取失败：" + (cardsState.error || "未知错误"), onRetry: vm.actions.retryCards })));
+        return h("div", { className: "sy-wb-center" },
+          banner,
+          toast,
+          h("div", { style: { padding: "24px" } },
+            h(SYView.ErrorBox, { message: "案例数据读取失败：" + (cardsState.error || "未知错误"), onRetry: vm.actions.retryCards })));
       }
 
       var cards = cardsState.data;
       var body;
-      if (vm.tab === "matrix") body = SYView.matrix(vm);
-      else if (vm.tab === "equilibrium") body = SYView.equilibrium(vm);
-      else if (vm.tab === "trail") body = SYView.trail(vm);
+      if (activeTab === "simulation") body = SYView.simulation(vm);
+      else if (activeTab === "costs") body = SYView.costs(vm);
+      else if (activeTab === "assumptions") body = SYView.assumptions(vm);
+      else if (activeTab === "evidence") body = SYView.evidence(vm);
+      else if (activeTab === "kb") body = SYView.kbTab(vm);
       else body = SYView.overview(vm);
 
       return h("div", { className: "sy-wb-center" },
+        banner,
+        toast,
         SYView.caseHead(cards),
         SYView.tabs(vm),
         h("div", { className: "sy-content", role: "tabpanel" }, body));
@@ -1849,6 +3029,13 @@ window.__ModuleLoader__.load({
           h("span", { className: "sy-logo" }, h(Icon, { name: "弈", size: 20 })),
           h("h1", null, "商奕工作台", h("span", { className: "sy-sub" }, "博弈论金融决策 · 只读日志投影")),
           h("span", { className: "sy-spacer" }),
+          vm.actions && vm.actions.toggleGuide
+            ? h("button", {
+                type: "button",
+                className: vm.guideOpen ? "sy-btn is-primary" : "sy-btn",
+                onClick: vm.actions.toggleGuide
+              }, vm.guideOpen ? "退出引导" : "新手引导")
+            : null,
           h("button", { type: "button", className: "sy-btn", onClick: vm.actions.refresh }, "刷新"),
           h("button", {
             type: "button",
@@ -1876,7 +3063,12 @@ window.__ModuleLoader__.load({
           cards: { phase: "idle", data: null, error: null },
           tab: "overview",
           inspectorOpen: false,
+          guideOpen: false,
           kb: { phase: "loading", count: 0, items: [] },
+          kbQuery: "",
+          kbKind: "all",
+          health: { phase: "loading", data: null, error: null },
+          toastMsg: null,
           cpForm: { note: "", phase: "idle", message: null, error: null },
           kbDoc: { open: false, slug: null, phase: "idle", data: null, error: null }
         });
@@ -1965,11 +3157,28 @@ window.__ModuleLoader__.load({
             });
         }, []);
 
-        // 首次进入：抓案例列表 + 知识库目录（一次）。
+        var loadHealth = React.useCallback(function () {
+          SYData.getHealth()
+            .then(function (json) {
+              setState(function (prev) {
+                return Object.assign({}, prev, { health: { phase: "ok", data: json, error: null } });
+              });
+            })
+            .catch(function (e) {
+              setState(function (prev) {
+                return Object.assign({}, prev, {
+                  health: { phase: "error", data: null, error: String((e && e.message) || e) }
+                });
+              });
+            });
+        }, []);
+
+        // 首次进入：抓案例列表 + 知识库目录 + 内核健康状态（一次）。
         React.useEffect(function () {
           loadCases();
           loadKb();
-        }, [loadCases, loadKb]);
+          loadHealth();
+        }, [loadCases, loadKb, loadHealth]);
 
         // 选中变化：抓该案例的 cards。
         React.useEffect(function () {
@@ -1982,9 +3191,10 @@ window.__ModuleLoader__.load({
           },
           selectCase: function (caseId) {
             setState(function (prev) {
-              if (prev.selectedCaseId === caseId) return prev;
+              if (prev.selectedCaseId === caseId && !prev.guideOpen) return prev;
               return Object.assign({}, prev, {
                 selectedCaseId: caseId,
+                guideOpen: false,
                 cards: { phase: "loading", data: null, error: null },
                 cpForm: { note: "", phase: "idle", message: null, error: null }
               });
@@ -2040,7 +3250,9 @@ window.__ModuleLoader__.load({
                 });
               });
           },
-          openKbDoc: function (slug) {
+          openKbDoc: function (target) {
+            if (!target) return;
+            var slug = SYData.resolveKbSlug(target, state.kb && state.kb.items);
             if (!slug) return;
             setState(function (prev) {
               return Object.assign({}, prev, {
@@ -2071,7 +3283,16 @@ window.__ModuleLoader__.load({
             });
           },
           setTab: function (tab) {
-            setState(function (prev) { return Object.assign({}, prev, { tab: tab }); });
+            setState(function (prev) { return Object.assign({}, prev, { tab: tab, guideOpen: false }); });
+          },
+          toggleGuide: function () {
+            setState(function (prev) { return Object.assign({}, prev, { guideOpen: !prev.guideOpen }); });
+          },
+          setKbQuery: function (q) {
+            setState(function (prev) { return Object.assign({}, prev, { kbQuery: String(q || "") }); });
+          },
+          setKbKind: function (kind) {
+            setState(function (prev) { return Object.assign({}, prev, { kbKind: String(kind || "all") }); });
           },
           toggleInspector: function () {
             setState(function (prev) { return Object.assign({}, prev, { inspectorOpen: !prev.inspectorOpen }); });
@@ -2079,9 +3300,13 @@ window.__ModuleLoader__.load({
           retryCards: function () {
             loadCards(state.selectedCaseId);
           },
+          refreshHealth: function () {
+            loadHealth();
+          },
           refresh: function () {
             loadCases({ keepSelection: true });
             loadKb();
+            loadHealth();
             if (state.selectedCaseId) loadCards(state.selectedCaseId);
           },
           openConversation: function () {
@@ -2092,6 +3317,74 @@ window.__ModuleLoader__.load({
             } catch (e) {
               // 布局服务不可用时不阻断：用户仍可用侧栏「新会话」切回。
             }
+          },
+          useExamplePrompt: function (prompt) {
+            var text = String(prompt || "").trim();
+            if (!text) return;
+            var copied = false;
+            try {
+              if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+                navigator.clipboard.writeText(text).catch(function () {});
+                copied = true;
+              } else if (typeof document !== "undefined" && typeof document.createElement === "function") {
+                var ta = document.createElement("textarea");
+                ta.value = text;
+                ta.setAttribute("readonly", "");
+                ta.style.position = "fixed";
+                ta.style.opacity = "0";
+                document.body.appendChild(ta);
+                ta.select();
+                try { copied = document.execCommand("copy"); } catch (e) { copied = false; }
+                document.body.removeChild(ta);
+              }
+            } catch (e) {
+              copied = false;
+            }
+            setState(function (prev) {
+              return Object.assign({}, prev, {
+                toastMsg: (copied ? "已复制示例提问到剪贴板，去对话面板粘贴发送即可：" : "已切换至对话面板，请参考示例输入：") +
+                  text.slice(0, 26) + (text.length > 26 ? "…" : "")
+              });
+            });
+            try {
+              if (ctx && ctx.layout && typeof ctx.layout.selectPanel === "function") {
+                ctx.layout.selectPanel("conversation");
+              }
+            } catch (e) { /* 忽略布局切换失败 */ }
+          },
+          exportReport: function () {
+            var cards = state.cards && state.cards.data;
+            if (!cards) return;
+            var md = SYData.exportReportMarkdown(cards);
+            if (!md) return;
+            var fileName = "shangyi-report-" + (cards.caseId || "case") + ".md";
+            try {
+              if (typeof document !== "undefined" && typeof Blob !== "undefined" && typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+                var blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement("a");
+                a.href = url;
+                a.download = fileName;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+              }
+              setState(function (prev) {
+                return Object.assign({}, prev, { toastMsg: "已导出只读确定性报告：" + fileName });
+              });
+            } catch (e) {
+              setState(function (prev) {
+                return Object.assign({}, prev, { toastMsg: "Markdown 下载失败：" + String((e && e.message) || e) });
+              });
+            }
+          },
+          printReport: function () {
+            try {
+              if (typeof window !== "undefined" && typeof window.print === "function") {
+                window.print();
+              }
+            } catch (e) { /* ignore */ }
           }
         };
 
@@ -2112,7 +3405,12 @@ window.__ModuleLoader__.load({
           cards: state.cards,
           tab: state.tab,
           inspectorOpen: state.inspectorOpen,
+          guideOpen: state.guideOpen,
           kb: state.kb,
+          kbQuery: state.kbQuery,
+          kbKind: state.kbKind,
+          health: state.health,
+          toastMsg: state.toastMsg,
           cpForm: state.cpForm,
           kbDoc: state.kbDoc,
           actions: actions

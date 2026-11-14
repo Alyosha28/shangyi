@@ -98,9 +98,23 @@ fn main() -> ExitCode {
                 ExitCode::from(3)
             }
         },
+        Command::Start { port, no_open } => {
+            match shangyi_cli::start_cmd::run_start(*port, *no_open) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("商奕：{e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Command::Report { case, format } => {
-            println!("（认到，还没实装）出报告：{case} → {}", format.as_str());
-            ExitCode::SUCCESS
+            match shangyi_cli::report_cmd::run_report(case, *format) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("商奕：{e}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         Command::Backtest { scenario } => {
             // `--scenario` 目前只用于**筛选展示**，不改变数据来源。
@@ -131,11 +145,19 @@ fn main() -> ExitCode {
             }
         }
         Command::Kb { op } => {
-            match op {
-                KbOp::Add { path } => println!("（认到，还没实装）知识库导入：{path}"),
-                KbOp::Search { query } => println!("（认到，还没实装）知识库检索：{query}"),
+            let res = match op {
+                KbOp::Add { path } => shangyi_cli::kb_cmd::run_kb_add(&path),
+                KbOp::Search { query } => shangyi_cli::kb_cmd::run_kb_search(&query),
+                KbOp::Show { id } => shangyi_cli::kb_cmd::run_kb_show(&id),
+                KbOp::List => shangyi_cli::kb_cmd::run_kb_list(),
+            };
+            match res {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("商奕：{e}");
+                    ExitCode::FAILURE
+                }
             }
-            ExitCode::SUCCESS
         }
         Command::Checkpoint {
             case,

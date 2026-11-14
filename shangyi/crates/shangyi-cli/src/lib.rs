@@ -12,7 +12,10 @@
 //! 在进入业务逻辑前即被拒绝。这比"各子命令自己校验"更可靠：
 //! 后者容易漏掉某个组合。
 
+pub mod kb_cmd;
+pub mod report_cmd;
 pub mod run;
+pub mod start_cmd;
 pub mod web_io;
 
 pub use run::search_provider_from_env;
@@ -172,6 +175,11 @@ pub enum Command {
         /// "写错参数"看起来像"用了默认"。
         refine_denominator: Option<i64>,
     },
+    /// 启动 Web 工作台与 DSH 宿主（推荐新手入口）。
+    Start {
+        port: Option<u16>,
+        no_open: bool,
+    },
     /// 渲染报告。
     Report { case: String, format: ReportFormat },
     /// 回测校准。
@@ -212,6 +220,8 @@ pub enum Command {
 pub enum KbOp {
     Add { path: String },
     Search { query: String },
+    Show { id: String },
+    List,
 }
 
 impl Command {
@@ -224,6 +234,7 @@ impl Command {
             Command::Resume { .. } => true,
             // solve 只读输入文件、只写 stdout——无状态、可在只读沙箱下运行
             Command::Solve { .. } => false,
+            Command::Start { .. } => true,
             Command::Report { .. } => true, // 产出文件
             Command::Backtest { .. } => true, // 更新判据权重
             Command::Kb { op } => matches!(op, KbOp::Add { .. }),
@@ -239,6 +250,7 @@ impl Command {
             Command::New { mode, .. } => mode.phases(),
             Command::Resume { .. } => vec![], // 阶段由已存案例状态决定
             Command::Solve { .. } => vec![SessionPhase::Solve],
+            Command::Start { .. } => vec![],
             Command::Report { .. } => vec![SessionPhase::Report],
             Command::Backtest { .. } => vec![SessionPhase::Archived],
             Command::Kb { .. } => vec![],
@@ -326,11 +338,12 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
             }
             Ok(Command::Backtest { scenario })
         }
+        "start" | "ui" => parse_start(rest),
         "kb" => {
             if rest.is_empty() {
                 return Err(CliError::MissingArg {
                     command: "kb".into(),
-                    arg: "add|search".into(),
+                    arg: "add|search|show|list".into(),
                 });
             }
             match rest[0].as_str() {
@@ -353,14 +366,61 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
                         op: KbOp::Search { query },
                     })
                 }
+                "show" => {
+                    let id = take_positional(&rest[1..], "kb show", "id")?;
+                    Ok(Command::Kb {
+                        op: KbOp::Show { id },
+                    })
+                }
+                "list" => {
+                    reject_unknown_options(&rest[1..], "kb list")?;
+                    Ok(Command::Kb { op: KbOp::List })
+                }
                 other => Err(CliError::InvalidValue {
                     value: other.to_string(),
-                    allowed: vec!["add".into(), "search".into()],
+                    allowed: vec!["add".into(), "search".into(), "show".into(), "list".into()],
                 }),
             }
         }
         other => Err(CliError::UnknownCommand(other.to_string())),
     }
+}
+
+fn parse_start(rest: &[String]) -> Result<Command, CliError> {
+    let mut port: Option<u16> = None;
+    let mut no_open = false;
+
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--port" | "-p" => {
+                let v = it.next().ok_or_else(|| CliError::MissingArg {
+                    command: "start".into(),
+                    arg: "--port".into(),
+                })?;
+                let parsed: u16 = v.parse().map_err(|_| CliError::InvalidValue {
+                    value: v.clone(),
+                    allowed: vec!["1..=65535 的端口号".into()],
+                })?;
+                if parsed == 0 {
+                    return Err(CliError::InvalidValue {
+                        value: v.clone(),
+                        allowed: vec!["1..=65535 的端口号".into()],
+                    });
+                }
+                port = Some(parsed);
+            }
+            "--no-open" => no_open = true,
+            other => {
+                return Err(CliError::UnknownOption {
+                    command: "start".into(),
+                    opt: other.to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(Command::Start { port, no_open })
 }
 
 fn parse_checkpoint(rest: &[String]) -> Result<Command, CliError> {
@@ -671,14 +731,17 @@ pub fn self_check(
 pub fn help() -> String {
     let mut s = String::new();
     s.push_str("商奕 —— 帮你把经营里的两难想清楚\n\n");
+    s.push_str("推荐新手入口（自动初始化 ~/.shangyi/cases 并拉起宣纸·墨玉工作台）：\n");
+    s.push_str("  shangyi start [--port 8791] [--no-open]   （别名：shangyi ui）\n\n");
     s.push_str("用法：\n");
+    s.push_str("  shangyi start [--port <端口>] [--no-open]\n");
     s.push_str("  shangyi new [--mode scenario|whatif|discover] [--playbook <id>] [--action <你打算怎么做>]\n");
     s.push_str("  shangyi resume <案例>\n");
+    s.push_str("  shangyi report <案例ID|latest|目录|case.jsonl> [--format md|pdf|docx]\n");
+    s.push_str("  shangyi kb list | kb search <关键词> | kb show <词条id> | kb add <路径>\n");
+    s.push_str("  shangyi backtest [--scenario <id>]\n");
     s.push_str("  shangyi solve --in <gamespec.json> [--method support_enumeration|lemke_howson|analytic]\n");
     s.push_str("               [--refine trembling_hand_perfect|ess_symmetric|ess_two_population] [--refine-denominator 6]\n");
-    s.push_str("  shangyi report <案例> [--format pdf|docx|md]\n");
-    s.push_str("  shangyi backtest [--scenario <id>]\n");
-    s.push_str("  shangyi kb add <路径> | kb search <关键词>\n");
     s.push_str("  shangyi checkpoint <案例|latest> --approve|--reject [--note <备注>] [--home <目录>]\n");
     s.push_str("  shangyi mcp-serve [--playbook <id>] [--mode scenario|whatif|discover] [--home <目录>]\n");
     s.push_str("                    [--resume <案例|latest>] [--auto-approve-checkpoints]\n\n");

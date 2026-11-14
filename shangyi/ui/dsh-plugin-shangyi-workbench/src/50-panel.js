@@ -11,7 +11,12 @@
           cards: { phase: "idle", data: null, error: null },
           tab: "overview",
           inspectorOpen: false,
+          guideOpen: false,
           kb: { phase: "loading", count: 0, items: [] },
+          kbQuery: "",
+          kbKind: "all",
+          health: { phase: "loading", data: null, error: null },
+          toastMsg: null,
           cpForm: { note: "", phase: "idle", message: null, error: null },
           kbDoc: { open: false, slug: null, phase: "idle", data: null, error: null }
         });
@@ -100,11 +105,28 @@
             });
         }, []);
 
-        // 首次进入：抓案例列表 + 知识库目录（一次）。
+        var loadHealth = React.useCallback(function () {
+          SYData.getHealth()
+            .then(function (json) {
+              setState(function (prev) {
+                return Object.assign({}, prev, { health: { phase: "ok", data: json, error: null } });
+              });
+            })
+            .catch(function (e) {
+              setState(function (prev) {
+                return Object.assign({}, prev, {
+                  health: { phase: "error", data: null, error: String((e && e.message) || e) }
+                });
+              });
+            });
+        }, []);
+
+        // 首次进入：抓案例列表 + 知识库目录 + 内核健康状态（一次）。
         React.useEffect(function () {
           loadCases();
           loadKb();
-        }, [loadCases, loadKb]);
+          loadHealth();
+        }, [loadCases, loadKb, loadHealth]);
 
         // 选中变化：抓该案例的 cards。
         React.useEffect(function () {
@@ -117,9 +139,10 @@
           },
           selectCase: function (caseId) {
             setState(function (prev) {
-              if (prev.selectedCaseId === caseId) return prev;
+              if (prev.selectedCaseId === caseId && !prev.guideOpen) return prev;
               return Object.assign({}, prev, {
                 selectedCaseId: caseId,
+                guideOpen: false,
                 cards: { phase: "loading", data: null, error: null },
                 cpForm: { note: "", phase: "idle", message: null, error: null }
               });
@@ -175,7 +198,9 @@
                 });
               });
           },
-          openKbDoc: function (slug) {
+          openKbDoc: function (target) {
+            if (!target) return;
+            var slug = SYData.resolveKbSlug(target, state.kb && state.kb.items);
             if (!slug) return;
             setState(function (prev) {
               return Object.assign({}, prev, {
@@ -206,7 +231,16 @@
             });
           },
           setTab: function (tab) {
-            setState(function (prev) { return Object.assign({}, prev, { tab: tab }); });
+            setState(function (prev) { return Object.assign({}, prev, { tab: tab, guideOpen: false }); });
+          },
+          toggleGuide: function () {
+            setState(function (prev) { return Object.assign({}, prev, { guideOpen: !prev.guideOpen }); });
+          },
+          setKbQuery: function (q) {
+            setState(function (prev) { return Object.assign({}, prev, { kbQuery: String(q || "") }); });
+          },
+          setKbKind: function (kind) {
+            setState(function (prev) { return Object.assign({}, prev, { kbKind: String(kind || "all") }); });
           },
           toggleInspector: function () {
             setState(function (prev) { return Object.assign({}, prev, { inspectorOpen: !prev.inspectorOpen }); });
@@ -214,9 +248,13 @@
           retryCards: function () {
             loadCards(state.selectedCaseId);
           },
+          refreshHealth: function () {
+            loadHealth();
+          },
           refresh: function () {
             loadCases({ keepSelection: true });
             loadKb();
+            loadHealth();
             if (state.selectedCaseId) loadCards(state.selectedCaseId);
           },
           openConversation: function () {
@@ -227,6 +265,74 @@
             } catch (e) {
               // 布局服务不可用时不阻断：用户仍可用侧栏「新会话」切回。
             }
+          },
+          useExamplePrompt: function (prompt) {
+            var text = String(prompt || "").trim();
+            if (!text) return;
+            var copied = false;
+            try {
+              if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+                navigator.clipboard.writeText(text).catch(function () {});
+                copied = true;
+              } else if (typeof document !== "undefined" && typeof document.createElement === "function") {
+                var ta = document.createElement("textarea");
+                ta.value = text;
+                ta.setAttribute("readonly", "");
+                ta.style.position = "fixed";
+                ta.style.opacity = "0";
+                document.body.appendChild(ta);
+                ta.select();
+                try { copied = document.execCommand("copy"); } catch (e) { copied = false; }
+                document.body.removeChild(ta);
+              }
+            } catch (e) {
+              copied = false;
+            }
+            setState(function (prev) {
+              return Object.assign({}, prev, {
+                toastMsg: (copied ? "已复制示例提问到剪贴板，去对话面板粘贴发送即可：" : "已切换至对话面板，请参考示例输入：") +
+                  text.slice(0, 26) + (text.length > 26 ? "…" : "")
+              });
+            });
+            try {
+              if (ctx && ctx.layout && typeof ctx.layout.selectPanel === "function") {
+                ctx.layout.selectPanel("conversation");
+              }
+            } catch (e) { /* 忽略布局切换失败 */ }
+          },
+          exportReport: function () {
+            var cards = state.cards && state.cards.data;
+            if (!cards) return;
+            var md = SYData.exportReportMarkdown(cards);
+            if (!md) return;
+            var fileName = "shangyi-report-" + (cards.caseId || "case") + ".md";
+            try {
+              if (typeof document !== "undefined" && typeof Blob !== "undefined" && typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+                var blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement("a");
+                a.href = url;
+                a.download = fileName;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+              }
+              setState(function (prev) {
+                return Object.assign({}, prev, { toastMsg: "已导出只读确定性报告：" + fileName });
+              });
+            } catch (e) {
+              setState(function (prev) {
+                return Object.assign({}, prev, { toastMsg: "Markdown 下载失败：" + String((e && e.message) || e) });
+              });
+            }
+          },
+          printReport: function () {
+            try {
+              if (typeof window !== "undefined" && typeof window.print === "function") {
+                window.print();
+              }
+            } catch (e) { /* ignore */ }
           }
         };
 
@@ -247,7 +353,12 @@
           cards: state.cards,
           tab: state.tab,
           inspectorOpen: state.inspectorOpen,
+          guideOpen: state.guideOpen,
           kb: state.kb,
+          kbQuery: state.kbQuery,
+          kbKind: state.kbKind,
+          health: state.health,
+          toastMsg: state.toastMsg,
           cpForm: state.cpForm,
           kbDoc: state.kbDoc,
           actions: actions

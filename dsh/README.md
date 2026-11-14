@@ -36,20 +36,23 @@ tools/dsh/
 ## 快速开始
 
 ```bash
-# 0) 编译商奕 Rust 二进制（CARGO_TARGET_DIR 默认落在 /tmp/shangyi-target）
+# 0) 编译并安装商奕 Rust 二进制（CARGO_TARGET_DIR 默认落在 /tmp/shangyi-target）
 tools/loop/build.sh build --release -p shangyi-cli
-export SHANGYI_BIN=/tmp/shangyi-target/release/shangyi
+mkdir -p ~/.shangyi/bin && cp /tmp/shangyi-target/release/shangyi ~/.shangyi/bin/shangyi
 
-# 1) 安装命令行 profile 并跑 26 项离线冒烟
+# 1) 安装 Web 工作台插件（仅装不启，后续统一交由 shangyi start）
+bash shangyi/ui/scripts/install-workbench.sh --install-only
+
+# 2) 单入口启动 Web 工作台（初始化 ~/.shangyi/{cases,runtime,kb}，默认端口 8791，自动打开浏览器）
+~/.shangyi/bin/shangyi start
+
+# 3) 或跑无头命令行 profile（26 项离线冒烟）
 tools/dsh/install-profile.sh
 tools/dsh/smoke.sh
 
-# 2) 通过本机 Magpie Gateway（http://127.0.0.1:3425/v1）跑真实会话
+# 4) 通过本机 Magpie Gateway（http://127.0.0.1:3425/v1）跑真实无头会话
 export MAGPIE_GATEWAY_KEY=...   # 或设置 DEEPSEEK_API_KEY 走官方直连
 dsh --profile shangyi --json "帮我测算：月租 20000 元、押三付一、装修 15 万、租期 24 个月的总成本"
-
-# 3) 一键构建并启动宣纸·墨玉 Web 工作台（默认端口 8791）
-bash shangyi/ui/scripts/install-workbench.sh
 ```
 
 冒烟脚本默认把 profile 装到 `/tmp/dsh-smoke`，**不会**写 `~/.dsh`（沙箱下 `~/.dsh`
@@ -71,7 +74,7 @@ bash shangyi/ui/scripts/install-workbench.sh
       config:
         serverName: shangyi
         transport: stdio
-        command: !!js 'process.env.SHANGYI_BIN ?? "shangyi"'
+        command: !!js '(function(){const fs=process.getBuiltinModule?.("node:fs"),path=process.getBuiltinModule?.("node:path"),os=process.getBuiltinModule?.("node:os");const c=[process.env.SHANGYI_BIN,path&&os?path.join(os.homedir(),".shangyi","bin","shangyi"):null,"/tmp/shangyi-target/release/shangyi"].filter(Boolean);if(fs){for(const x of c){try{fs.accessSync(x,fs.constants.X_OK);return x}catch{}}}return process.env.SHANGYI_BIN||"shangyi"})()'
         args: ['mcp-serve']
         toolCallTimeoutMs: 300000
         failOnStartupError: true
@@ -82,10 +85,8 @@ bash shangyi/ui/scripts/install-workbench.sh
   `maxInstructionBytes` / `failOnStartupError` / `reconnect.*`）。工具名规则见同文件 `:71`：
   `mcp__<serverName>__<tool>`。
 - **`${VAR}` 不被 mcp-client 展开**：它的 README 只提供「`env` 的值用 `!!js` 读环境变量」的写法。
-  所以覆盖二进制路径的方式是 dsh patch 层的 `!!js` 表达式 + 环境变量：
-  `SHANGYI_BIN=/abs/path/shangyi dsh --profile shangyi "..."`；不设则落到 PATH 上的 `shangyi`。
-  这条 `!!js` 被真实求值过（冒烟 d1 用 `SHANGYI_BIN` 指向包装脚本，dsh 确实 spawn 到了它）。
-- **`failOnStartupError: true` 是发布默认**（P1-3 的修复）：服务端缺失时不许静默。
+  因此 `cordis.patch.yml` 的 `!!js` 表达式按顺序解析 `SHANGYI_BIN` → `~/.shangyi/bin/shangyi` → `/tmp/shangyi-target/release/shangyi` → `PATH` 上的 `shangyi`。
+- **缺二进制 / 缺工具强提示**：除 `failOnStartupError: true` 外，Web 版还提供 `GET /api/shangyi/health`，由 `dsh-plugin-shangyi-shell`（对话底栏告警条）与 `dsh-plugin-shangyi-workbench`（工作台顶部阻断条）实时检测可执行文件与 `mcp__shangyi__*` 工具数量，缺二进制时绝不静默降级为裸 LLM 对话。
   本机实测（无二进制、未设 `SHANGYI_BIN`）：
   - stderr 打印 `dsh: warning: 1 entry did not activate` +
     `mcp-client(shangyi): initial connection or tool synchronization failed` +

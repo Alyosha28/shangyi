@@ -20,6 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 shangyi-core = { path = "../shangyi-core" }
+shangyi-report = { path = "../shangyi-report" }
 # `solve` 子命令：离线读入 GameSpec JSON 文件（解析与校验）
 shangyi-gamespec = { path = "../shangyi-gamespec" }
 # persona 群仿真：CLI 组装层构造 `LlmPersonaActor` 并注入执行器

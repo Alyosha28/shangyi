@@ -19,7 +19,7 @@
       config:
         serverName: shangyi
         transport: stdio
-        command: !!js 'process.env.SHANGYI_BIN ?? "/tmp/shangyi-target/release/shangyi"'
+        command: !!js '(function(){const fs=process.getBuiltinModule?.("node:fs"),path=process.getBuiltinModule?.("node:path"),os=process.getBuiltinModule?.("node:os");const c=[process.env.SHANGYI_BIN,path&&os?path.join(os.homedir(),".shangyi","bin","shangyi"):null,"/tmp/shangyi-target/release/shangyi"].filter(Boolean);if(fs){for(const x of c){try{fs.accessSync(x,fs.constants.X_OK);return x}catch{}}}return process.env.SHANGYI_BIN||"shangyi"})()'
         args: ['mcp-serve']
         toolCallTimeoutMs: 300000
         failOnStartupError: true

@@ -45,27 +45,37 @@
 - Python `>= 3.11`（用于门禁脚本与 sidecar）
 - 可选：`dsh`（`@deepseek-ai/dsh`，用于运行 DeepSeek Harness 宿主与 Web 工作台）
 
-### 2. 编译与运行 Rust 引擎 / CLI
+### 2. 编译与单入口启动（推荐）
 
 ```bash
-# 编译商奕 CLI（通过构建包装器默认输出至 /tmp/shangyi-target）
+# 编译并安装发布版商奕 CLI 到 ~/.shangyi/bin（不污染工作目录）
 tools/loop/build.sh build --release -p shangyi-cli
+mkdir -p ~/.shangyi/bin && cp /tmp/shangyi-target/release/shangyi ~/.shangyi/bin/shangyi
 
-# 查看 CLI 用法
-/tmp/shangyi-target/release/shangyi --help
+# 一条命令初始化 ~/.shangyi/{cases,runtime,kb}、安装/启动 DSH Web 工作台并打开浏览器
+~/.shangyi/bin/shangyi start
 
-# 启动 stdio MCP 服务端（供 DSH 挂载）
-/tmp/shangyi-target/release/shangyi mcp-serve
+# 如仅需无浏览器模式或指定端口：
+~/.shangyi/bin/shangyi start --no-open --port 8791
 ```
 
-### 3. 启动 DSH Web 工作台（`shangyi-web`）
+若尚未把工作台插件挂入 DSH，请先执行一次 `bash shangyi/ui/scripts/install-workbench.sh --install-only`（或在 `install-workbench.sh` 后直接用 `shangyi start` 统一拉起）。工作台顶部与对话侧同时接有 `/api/shangyi/health` 健康探测：若缺少 `shangyi` 二进制或 MCP 工具未连接，界面会**强阻断告警并给出修复命令**，绝不会静默退化成纯大模型对话。
+
+### 3. 常用 CLI 子命令（`report` / `kb` / `mcp-serve`）
 
 ```bash
-# 1) 编译发布版商奕二进制
-tools/loop/build.sh build --release -p shangyi-cli
+# 导出确定性 Markdown 决策报告（校验 provenance、隔离 sandbox_exec，拒绝空案例或纯沙箱案例）
+shangyi report latest --format md
+shangyi report <case_id> --format md > report.md
 
-# 2) 构建并挂载三件套插件与受控配置到 ~/.dsh/profiles/shangyi-web
-bash shangyi/ui/scripts/install-workbench.sh
+# 检索、阅读、列出与追加自定义经验知识条目（合并内置 35 篇 + ~/.shangyi/kb）
+shangyi kb list
+shangyi kb search "均衡"
+shangyi kb show equilibrium-selection
+shangyi kb add ./my-experience.md
+
+# 启动 stdio MCP 服务端（供 DSH 宿主挂载）
+shangyi mcp-serve
 ```
 
 更多 DSH Profile 配置与无头模式用法见 [`dsh/README.md`](dsh/README.md)；引擎与序列化约束见 [`shangyi/README.md`](shangyi/README.md)；系统总体架构见 [`docs/商奕-系统设计文档-v0.3.md`](docs/商奕-系统设计文档-v0.3.md)。

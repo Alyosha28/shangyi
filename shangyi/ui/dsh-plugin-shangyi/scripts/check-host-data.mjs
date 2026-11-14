@@ -223,19 +223,29 @@ check('路由注册：4 条 GET + 1 条 POST + 处理器返回码', async () => 
   mod.apply(fakeCtx)
 
   const paths = routes.map((r) => r.path).sort()
-  assert.deepEqual(paths, ['/api/shangyi/cards', '/api/shangyi/cases', '/api/shangyi/checkpoint', '/api/shangyi/kb', '/api/shangyi/kb/doc'])
+  assert.deepEqual(paths, ['/api/shangyi/cards', '/api/shangyi/cases', '/api/shangyi/checkpoint', '/api/shangyi/health', '/api/shangyi/kb', '/api/shangyi/kb/doc'])
   for (const r of routes) {
     const wantMethods = r.path === '/api/shangyi/checkpoint' ? ['POST'] : ['GET']
     assert.deepEqual(r.methods, wantMethods, `${r.path} 方法不符：${JSON.stringify(r.methods)}`)
   }
-  assert.equal(routes.length, 5, `注册了 ${routes.length} 条路由`)
-  assert.equal(labels.length, 5, `effect 清理项 ${labels.length} 条`)
+  assert.equal(routes.length, 6, `注册了 ${routes.length} 条路由`)
+  assert.equal(labels.length, 6, `effect 清理项 ${labels.length} 条`)
 
   const byPath = Object.fromEntries(routes.map((r) => [r.path, r]))
   const call = async (p, qs = '', init = undefined) => {
     const res = await byPath[p].fetch(new Request(`http://127.0.0.1${p}${qs}`, init))
     return { status: res.status, body: await res.json(), cache: res.headers.get('cache-control') }
   }
+
+  const health = await call('/api/shangyi/health')
+  assert.equal(health.status, 200)
+  assert.equal(health.cache, 'no-store')
+  assert.ok('binary' in health.body && 'kb' in health.body && 'workspace' in health.body && Array.isArray(health.body.problems))
+
+  const degraded = mod.getHealthStatus({ binPath: '/nonexistent/shangyi-missing-bin', mcpToolNames: [], home: tempFixtureHome || os.tmpdir() })
+  assert.equal(degraded.ok, false)
+  assert.ok(degraded.problems.some((p) => p.code === 'missing_binary'))
+  assert.ok(degraded.problems.some((p) => p.code === 'mcp_tools_missing'))
 
   const kb = await call('/api/shangyi/kb')
   assert.equal(kb.status, 200); assert.equal(kb.body.ok, true); assert.equal(kb.body.docs.length, KB_EXPECTED)
@@ -256,6 +266,7 @@ check('路由注册：4 条 GET + 1 条 POST + 处理器返回码', async () => 
 
   const cards = await call('/api/shangyi/cards')
   assert.equal(cards.status, 200); assert.ok(cards.body.ok); assert.ok('meta' in cards.body && 'matrix' in cards.body)
+  assert.ok('costs' in cards.body && 'assumptions' in cards.body && 'evidence' in cards.body && 'conclusion' in cards.body)
 
   // POST /api/shangyi/checkpoint 校验与隔离写入测试
   const badCt = await call('/api/shangyi/checkpoint', '', {
@@ -314,7 +325,7 @@ check('路由注册：4 条 GET + 1 条 POST + 处理器返回码', async () => 
     fs.rmSync(cpHome, { recursive: true, force: true })
   }
 
-  return `GET×4 + POST×1；kb=200(${kb.body.docs.length}) doc=200 evil=400 missing=404 cases=200(${cases.body.cases.length}) cards=200 checkpoint=415/403/400/404/200/409`
+  return `GET×5 + POST×1；health=200 kb=200(${kb.body.docs.length}) doc=200 evil=400 missing=404 cases=200(${cases.body.cases.length}) cards=200 checkpoint=415/403/400/404/200/409`
 })
 
 // ── 执行 + 输出 ──────────────────────────────────────────────────────────────

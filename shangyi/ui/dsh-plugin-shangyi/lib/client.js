@@ -198,18 +198,18 @@ window.__ModuleLoader__.load({
     }
 
     function Drawer(props) {
-      var st = React.useState({ phase: "loading", data: null, error: null, cases: [] });
+      var st = React.useState({ phase: "loading", data: null, error: null, cases: [], health: null });
       var state = st[0], setState = st[1];
 
       var load = React.useCallback(function (ref) {
-        setState(function (prev) { return { phase: "loading", data: prev.data, error: null, cases: prev.cases }; });
+        setState(function (prev) { return { phase: "loading", data: prev.data, error: null, cases: prev.cases, health: prev.health }; });
         fetch("/api/shangyi/cards?case=" + encodeURIComponent(ref || "latest-cards"), { headers: { accept: "application/json" }, cache: "no-store" })
           .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
           .then(function (j) {
             if (!j || j.ok !== true) throw new Error((j && j.error) || "接口返回 ok=false");
-            setState(function (prev) { return { phase: "ok", data: j, error: null, cases: prev.cases }; });
+            setState(function (prev) { return { phase: "ok", data: j, error: null, cases: prev.cases, health: prev.health }; });
           })
-          .catch(function (e) { setState(function (prev) { return { phase: "error", data: null, error: String(e && e.message || e), cases: prev.cases }; }); });
+          .catch(function (e) { setState(function (prev) { return { phase: "error", data: null, error: String(e && e.message || e), cases: prev.cases, health: prev.health }; }); });
       }, []);
 
       React.useEffect(function () {
@@ -218,7 +218,20 @@ window.__ModuleLoader__.load({
           .then(function (r) { return r.json(); })
           .then(function (j) { if (j && j.ok && Array.isArray(j.cases)) setState(function (prev) { return Object.assign({}, prev, { cases: j.cases }); }); })
           .catch(function () { /* 选择器失败不影响卡片 */ });
+        fetch("/api/shangyi/health", { headers: { accept: "application/json" }, cache: "no-store" })
+          .then(function (r) { return r.json(); })
+          .then(function (hJson) { if (hJson) setState(function (prev) { return Object.assign({}, prev, { health: hJson }); }); })
+          .catch(function () { /* 健康检查失败不阻断列表 */ });
       }, [load]);
+
+      var healthAlert = state.health && state.health.ok === false
+        ? h("div", { style: { marginBottom: 10, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--dsw-alias-state-error-primary, #A83E30)", background: "var(--dsw-alias-bg-layer-2, #E9E4D8)", color: "var(--dsw-alias-state-error-primary, #A83E30)", fontSize: 12 } },
+            h("div", { style: { fontWeight: 600, marginBottom: 4 } }, "⚠ 商奕确定性求解内核未就绪（请勿无工具盲聊）"),
+            ((state.health.problems || []).map(function (p, idx) {
+              return h("div", { key: idx, style: { color: "var(--dsw-alias-label-primary, #1D1E1C)", marginTop: 4 } },
+                p.title + " — " + p.detail + ((p.fixCommands && p.fixCommands[0]) ? (" ｜ 建议执行：" + p.fixCommands[0]) : ""));
+            })))
+        : null;
 
       var body;
       if (state.phase === "loading" && !state.data) {
@@ -254,6 +267,7 @@ window.__ModuleLoader__.load({
           h(CasePicker, { cases: state.cases, value: state.data ? state.data.source.caseId : "", onChange: load })),
         h("div", { style: Object.assign({ marginBottom: 10 }, MUTED) },
           "数据来自商奕案例日志（case.jsonl）的只读投影；前端只展示，不重算、不编造数字。"),
+        healthAlert,
         body,
         state.data ? h("div", { style: SMALL },
           "来源：" + state.data.source.path + "（" + state.data.source.caseId + "，请求 " + state.data.requested + "）") : null,

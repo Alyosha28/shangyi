@@ -138,10 +138,62 @@
         // 知识库条目按钮与全文阅读抽屉
         ".sy-kb-btn{appearance:none;display:block;width:100%;text-align:left;padding:4px 8px;margin:2px -8px;border:0;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:11px;line-height:1.5;cursor:pointer}",
         ".sy-kb-btn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}",
-        ".sy-kb-drawer{position:absolute;top:0;right:0;bottom:0;width:min(560px,92%);z-index:4;display:flex;flex-direction:column;background:var(--dsw-alias-bg-base);border-left:1px solid var(--dsw-alias-border-l1)}",
+        ".sy-kb-drawer{position:absolute;top:0;right:0;bottom:0;width:min(600px,94%);z-index:4;display:flex;flex-direction:column;background:var(--dsw-alias-bg-base);border-left:1px solid var(--dsw-alias-border-l1)}",
         ".sy-kb-drawer-head{flex:none;display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}",
         ".sy-kb-drawer-title{margin:0;font-size:13px;font-weight:600;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-        ".sy-kb-drawer-body{flex:1 1 auto;overflow:auto;padding:16px 24px;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.7;color:var(--dsw-alias-label-primary)}",
+        ".sy-kb-drawer-meta{flex:none;display:flex;flex-wrap:wrap;gap:6px;padding:8px 24px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}",
+        ".sy-kb-drawer-body{flex:1 1 auto;overflow:auto;padding:16px 24px;word-break:break-word;font-size:13px;line-height:1.7;color:var(--dsw-alias-label-primary)}",
+
+        // 健康状态警报条（缺二进制/MCP未连接时强提示）
+        ".sy-health-alert{margin:12px 24px 0;padding:12px 16px;border-radius:8px;border:1px solid var(--dsw-alias-state-error-primary);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}",
+        ".sy-health-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}",
+        ".sy-health-title{font-size:13px;font-weight:600;color:var(--dsw-alias-state-error-primary)}",
+        ".sy-health-cmd{display:inline-block;margin-top:4px;padding:3px 8px;border-radius:6px;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l1);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--dsw-alias-label-primary)}",
+
+        // 新手引导与示例任务卡
+        ".sy-guide{padding:24px;max-width:840px;margin:0 auto}",
+        ".sy-guide-hero{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:16px 20px;background:var(--dsw-alias-bg-layer-1);margin-bottom:16px}",
+        ".sy-guide-hero h2{margin:0 0 8px;font-size:16px;font-weight:600}",
+        ".sy-guide-hero p{margin:0;font-size:13px;line-height:1.6;color:var(--dsw-alias-label-secondary)}",
+        ".sy-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:16px 0}",
+        ".sy-step-card{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:12px 14px;background:var(--dsw-alias-bg-base)}",
+        ".sy-step-num{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:999px;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-foreground);font-size:11px;font-weight:600;margin-right:8px}",
+        ".sy-examples{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:8px}",
+        ".sy-ex-card{appearance:none;text-align:left;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:12px 14px;background:var(--dsw-alias-bg-layer-1);color:inherit;font:inherit;cursor:pointer;display:flex;flex-direction:column;gap:6px}",
+        ".sy-ex-card:hover{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-interactive-bg-hover)}",
+        ".sy-ex-title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary)}",
+        ".sy-ex-hint{font-size:12px;color:var(--dsw-alias-label-secondary);line-height:1.5}",
+
+        // 白话结论卡与导出工具条
+        ".sy-conclusion{border:1px solid var(--dsw-alias-brand-primary);border-radius:8px;padding:16px;background:var(--dsw-alias-bg-layer-1);margin-bottom:16px}",
+        ".sy-conclusion-hl{margin:0 0 10px;font-size:15px;font-weight:600;line-height:1.5;color:var(--dsw-alias-label-primary)}",
+        ".sy-act-list{margin:8px 0;padding-left:20px;font-size:13px;line-height:1.65}",
+        ".sy-act-why{color:var(--dsw-alias-label-secondary);font-size:12px;margin-top:2px}",
+        ".sy-toolbar-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}",
+
+        // 成本精算与内联知识库网格
+        ".sy-cost-card{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:16px;background:var(--dsw-alias-bg-layer-1);margin-bottom:16px}",
+        ".sy-missing-val{color:var(--dsw-alias-state-warn-primary);font-weight:600}",
+        ".sy-kb-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px}",
+        ".sy-kb-search{flex:1 1 220px;min-width:180px;height:32px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base);color:inherit;font:inherit;font-size:12px}",
+        ".sy-kb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}",
+        ".sy-kb-card{appearance:none;text-align:left;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:12px 14px;background:var(--dsw-alias-bg-layer-1);color:inherit;font:inherit;cursor:pointer;display:flex;flex-direction:column;gap:6px}",
+        ".sy-kb-card:hover{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-interactive-bg-hover)}",
+
+        // 安全 Markdown 排版（纯 React 节点渲染）
+        ".sy-md h1,.sy-md h2,.sy-md h3,.sy-md h4{margin:16px 0 8px;font-weight:600;line-height:1.4;color:var(--dsw-alias-label-primary)}",
+        ".sy-md h1{font-size:17px;border-bottom:1px solid var(--dsw-alias-border-l1);padding-bottom:6px}",
+        ".sy-md h2{font-size:15px}",
+        ".sy-md h3{font-size:13px}",
+        ".sy-md p{margin:8px 0;font-size:13px;line-height:1.7}",
+        ".sy-md ul,.sy-md ol{margin:8px 0;padding-left:22px;font-size:13px;line-height:1.7}",
+        ".sy-md blockquote{margin:10px 0;padding:8px 12px;border-left:3px solid var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:0 8px 8px 0}",
+        ".sy-md pre{margin:10px 0;padding:10px 12px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.55}",
+        ".sy-md code{padding:1px 5px;border-radius:4px;background:var(--dsw-alias-bg-layer-2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}",
+        ".sy-md pre code{padding:0;background:transparent}",
+        ".sy-md hr{border:0;border-top:1px solid var(--dsw-alias-border-l1);margin:14px 0}",
+        ".sy-md a{color:var(--dsw-alias-brand-primary);text-decoration:underline}",
+        ".sy-md-wiki{appearance:none;border:0;border-bottom:1px dashed var(--dsw-alias-brand-primary);padding:0 2px;background:transparent;color:var(--dsw-alias-brand-primary);font:inherit;cursor:pointer}",
 
         // 标签
         ".sy-tag{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:8px;font-size:11px;border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums;white-space:nowrap}",
@@ -157,5 +209,13 @@
         ".sy-wb-right{display:none}",
         ".sy-insp-toggle{display:inline-flex}",
         ".sy-wb-right.is-open{display:block;position:absolute;top:0;right:0;bottom:0;width:272px;z-index:3;box-shadow:0 0 0 1px var(--dsw-alias-border-l1)}",
+        "}",
+
+        // 打印 / 另存 PDF 排版
+        "@media print{",
+        ".sy-wb{height:auto;overflow:visible}",
+        ".sy-wb-head,.sy-wb-left,.sy-wb-right,.sy-tabs,.sy-btn,.sy-kb-drawer{display:none!important}",
+        ".sy-wb-body{display:block!important;overflow:visible}",
+        ".sy-wb-center,.sy-content{overflow:visible!important;height:auto!important;padding:0!important}",
         "}"
     ].join("\n");

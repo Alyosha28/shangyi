@@ -14,7 +14,8 @@ import {
   extractTrustedUserMessage,
   recordTrustedUserInput,
   listKb,
-  readKbDoc
+  readKbDoc,
+  getHealthStatus
 } from '../lib/index.js'
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'shangyi-host-test-'))
@@ -201,6 +202,115 @@ try {
   }
   for (const required of ['调价 / 促销响应', '支持枚举（精确）', 'zhCompleteness', 'badLines']) {
     assert.ok(drawerSrc.includes(required), `lib/client.js 缺少中文化或 badLines 支持：${required}`)
+  }
+
+  // M2: 扩展投影（costs / assumptions / evidence / conclusion）、sandbox_exec 隔离、phase_rewound 重置、用户 KB 合并与健康探测
+  const m2Dir = path.join(dayDir, 'case-20261113-m2-001')
+  fs.mkdirSync(m2Dir, { recursive: true })
+  fs.writeFileSync(path.join(m2Dir, 'header.json'), JSON.stringify({ case_id: 'case-20261113-m2-001', mode: 'cost', playbook_id: 'pricing_response' }))
+  fs.writeFileSync(path.join(m2Dir, 'case.jsonl'), [
+    JSON.stringify({ seq: 1, event: { type: 'task_scope_selected', scope: 'research_and_cost', reason: '开店精算' } }),
+    JSON.stringify({ seq: 2, event: { type: 'tool_call_started', call_id: 'sx1', name: 'sandbox_exec', arguments: '{}' } }),
+    JSON.stringify({ seq: 3, event: { type: 'tool_call_finished', call_id: 'sx1', outcome: { status: 'ok', output: '{"fake":99999}' } } }),
+    JSON.stringify({ seq: 4, event: { type: 'tool_call_started', call_id: 'bc1', name: 'business_cost', arguments: '{}' } }),
+    JSON.stringify({
+      seq: 5,
+      event: {
+        type: 'tool_call_finished',
+        call_id: 'bc1',
+        outcome: {
+          status: 'ok',
+          output: JSON.stringify({
+            scenario_id: 's1',
+            scenario: '铺位A',
+            currency: 'CNY',
+            listed_upfront_cash: 78000,
+            listed_upfront_cash_expense: 60000,
+            listed_refundable_deposits: 18000,
+            listed_monthly_fixed_cost: 6000,
+            costs_complete: false,
+            amounts_complete: false,
+            items: [{ name: '消防改造', treatment: 'cash_expense', normalized_period: 'once', normalized_amount: null, missing_amount_reason: '待现场报价' }]
+          })
+        }
+      }
+    }),
+    JSON.stringify({
+      seq: 6,
+      event: {
+        type: 'tool_call_started',
+        call_id: 'gs1',
+        name: 'gamespec_build',
+        arguments: JSON.stringify({
+          spec: {
+            game_id: 'g1',
+            players: [{ id: 'us', name: '我方', relation_to_game: 'Player' }, { id: 'comp', name: '竞对', relation_to_game: 'Player' }],
+            strategies: { us: ['跟降', '稳价'], comp: ['低价', '原价'] },
+            params: {
+              p_rent: { name: '月租金', value: { kind: 'literal', value: 6000 }, unit: '元/月', source: { kind: 'user_confirmed', checkpoint: 'cp2' } },
+              p_prior: { name: '客流弹性', value: { kind: 'literal', value: 0.25 }, source: { kind: 'industry_prior', prior_ref: '茶饮报告' } },
+              p_unconf: { name: '对手降幅', value: { kind: 'literal', value: 2 }, source: { kind: 'assumed', note: '暂估' } }
+            },
+            payoffs: {}
+          }
+        })
+      }
+    }),
+    JSON.stringify({ seq: 7, event: { type: 'tool_call_finished', call_id: 'gs1', outcome: { status: 'ok', output: '{"ok":true}' } } }),
+    JSON.stringify({
+      seq: 8,
+      event: {
+        type: 'tool_call_started',
+        call_id: 'rc1',
+        name: 'recommend_build',
+        arguments: '{}'
+      }
+    }),
+    JSON.stringify({
+      seq: 9,
+      event: {
+        type: 'tool_call_finished',
+        call_id: 'rc1',
+        outcome: { status: 'ok', output: JSON.stringify({ headline: '优先稳价并补消防报价', actions: [{ action: '核清消防费用', rationale: '当前未取得' }], do_not: ['盲目9.9元跟降'] }) }
+      }
+    })
+  ].join('\n') + '\n')
+  const m2Cards = projectCase('case-20261113-m2-001', tmpHome)
+  assert.equal(m2Cards.evidence.exploratoryCalls, 1)
+  assert.equal(m2Cards.costs.scenarios.length, 1)
+  assert.equal(m2Cards.costs.missingItems.length, 1)
+  assert.equal(m2Cards.assumptions.counts.user_confirmed, 1)
+  assert.equal(m2Cards.assumptions.counts.industry_prior, 1)
+  assert.equal(m2Cards.assumptions.counts.assumed, 1)
+  assert.ok(m2Cards.assumptions.gaps.some((g) => g.includes('消防改造') && g.includes('待现场报价')))
+  assert.equal(m2Cards.conclusion.headline, '优先稳价并补消防报价')
+  assert.equal(m2Cards.conclusion.hasExploratoryOnly, false)
+
+  // 验证 phase_rewound 清除陈旧 recommend_build 结论与成本投影（不残留上一轮假设产物）
+  fs.appendFileSync(path.join(m2Dir, 'case.jsonl'), JSON.stringify({ seq: 10, event: { type: 'phase_rewound', from: 'recommend', to: 'intake', due_to: '重改前提' } }) + '\n')
+  const rewoundM2 = projectCase('case-20261113-m2-001', tmpHome)
+  assert.equal(rewoundM2.conclusion.headline, null, '回退到 intake 应清空陈旧正式结论')
+  assert.equal(rewoundM2.costs.scenarios.length, 0, '回退到 intake 应清空陈旧成本测算')
+
+  // 验证用户自定义 $SHANGYI_HOME/kb 合并列出与读取
+  const userKbDir = path.join(tmpHome, 'kb')
+  fs.mkdirSync(userKbDir, { recursive: true })
+  fs.writeFileSync(path.join(userKbDir, 'custom-m2-note.md'), '---\nid: custom_m2_note\nname: 用户定制经验\nkind: concept\nsummary: 实测沉淀\ntags: [m2]\n---\n# 经验细节\n\n正文内容。\n')
+  const prevShHome = process.env.SHANGYI_HOME
+  process.env.SHANGYI_HOME = tmpHome
+  try {
+    const mergedKb = listKb()
+    assert.ok(mergedKb.docs.some((d) => d.slug === 'custom-m2-note' && d.userAdded === true))
+    const userDoc = readKbDoc('custom-m2-note')
+    assert.equal(userDoc.ok, true)
+    assert.equal(userDoc.userAdded, true)
+    assert.ok(userDoc.markdown.includes('用户定制经验'))
+    const badHealth = getHealthStatus({ binPath: '/nonexistent/missing-shangyi', mcpToolNames: [], home: tmpHome })
+    assert.equal(badHealth.ok, false)
+    assert.ok(badHealth.problems.some((p) => p.code === 'missing_binary'))
+  } finally {
+    if (prevShHome === undefined) delete process.env.SHANGYI_HOME
+    else process.env.SHANGYI_HOME = prevShHome
   }
 
   console.log('✓ dsh-plugin-shangyi 宿主投影、waiting/stuck 区分、phase_rewound/followup 状态追踪、受控关口结算、可信账本、降级抽屉主题令牌与 KB 越界防护全部通过')

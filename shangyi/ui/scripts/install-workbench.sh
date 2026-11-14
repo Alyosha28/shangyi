@@ -2,8 +2,9 @@
 # 把商奕三件套插件（host + shell + workbench）与受控 patch 层装进 Web 工作台 profile（shangyi-web）。
 #
 # 用法：
-#   bash shangyi/ui/scripts/install-workbench.sh            # 构建 + 安装 + 重启实例
-#   bash shangyi/ui/scripts/install-workbench.sh --no-boot  # 构建 + 安装，不启动后台服务
+#   bash shangyi/ui/scripts/install-workbench.sh                 # 构建 + 安装 + 启动实例并打开浏览器
+#   bash shangyi/ui/scripts/install-workbench.sh --no-open       # 启动实例但不自动拉起浏览器
+#   bash shangyi/ui/scripts/install-workbench.sh --install-only  # 仅构建 + 同步插件与 profile（不启动实例）
 #   bash shangyi/ui/scripts/install-workbench.sh --uninstall
 set -euo pipefail
 
@@ -11,6 +12,7 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"   # 仓库根
 PROFILE="${SHANGYI_VERIFY_PROFILE:-shangyi-web}"
 PORT="${SHANGYI_VERIFY_PORT:-8791}"
 DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
+SHANGYI_HOME_DIR="${SHANGYI_HOME:-$HOME/.shangyi}"
 DEST_PROFILE_DIR="$DSH_HOME_DIR/profiles/$PROFILE"
 
 HOST_DIR="$ROOT/shangyi/ui/dsh-plugin-shangyi"
@@ -21,13 +23,17 @@ PATCH_SRC="$ROOT/dsh/profile-web/cordis.patch.yml"
 
 DO_UNINSTALL=0
 DO_BOOT=1
+DO_OPEN=1
 for a in "$@"; do
   case "$a" in
     --uninstall) DO_UNINSTALL=1 ;;
-    --no-boot) DO_BOOT=0 ;;
+    --no-boot|--install-only) DO_BOOT=0 ;;
+    --no-open) DO_OPEN=0 ;;
     *) echo "未知参数: $a" >&2; exit 2 ;;
   esac
 done
+
+mkdir -p "$SHANGYI_HOME_DIR/cases" "$SHANGYI_HOME_DIR/runtime" "$SHANGYI_HOME_DIR/kb"
 
 clean_appledouble() {
   for d in "$ROOT/shangyi/ui" "$ROOT/dsh/skills" "$DEST_PROFILE_DIR"; do
@@ -110,13 +116,44 @@ grep -q "id: preset-shangyi" /tmp/shangyi-web-dump.yml
 grep -q "dsh-plugin-shangyi-workbench" /tmp/shangyi-web-dump.yml
 echo "✓ $PROFILE 合成树核验通过（$(wc -l < /tmp/shangyi-web-dump.yml | tr -d ' ') 行）"
 
-[ "$DO_BOOT" = "1" ] || { echo "已装完（--no-boot 未启动实例）"; exit 0; }
+resolve_shangyi_bin() {
+  if [ -n "${SHANGYI_BIN:-}" ]; then
+    [ -x "$SHANGYI_BIN" ] && { printf '%s\n' "$SHANGYI_BIN"; return 0; }
+    return 1
+  fi
+  for cand in "$SHANGYI_HOME_DIR/bin/shangyi" "$HOME/.shangyi/bin/shangyi" "/tmp/shangyi-target/release/shangyi"; do
+    if [ -x "$cand" ]; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  if command -v shangyi >/dev/null 2>&1; then
+    command -v shangyi
+    return 0
+  fi
+  return 1
+}
+
+SHANGYI_BIN_RESOLVED="$(resolve_shangyi_bin || true)"
+
+if [ "$DO_BOOT" != "1" ]; then
+  if [ -z "$SHANGYI_BIN_RESOLVED" ]; then
+    echo "⚠ 提示：尚未检测到可执行 'shangyi' 二进制；插件已装入 profile，启动前请执行：" >&2
+    echo "    tools/loop/build.sh build --release -p shangyi-cli" >&2
+    echo "  或安装到用户目录：cargo install --path shangyi/crates/shangyi-cli --root ~/.shangyi" >&2
+  fi
+  echo "✓ 已完成工作台构建与安装（profile: $PROFILE，持久化工作区: $SHANGYI_HOME_DIR/cases）"
+  exit 0
+fi
 
 stop_instance
 
-SHANGYI_BIN_RESOLVED="${SHANGYI_BIN:-/tmp/shangyi-target/release/shangyi}"
-if [ ! -x "$SHANGYI_BIN_RESOLVED" ]; then
-  echo "找不到可执行商奕二进制：$SHANGYI_BIN_RESOLVED（请先运行 tools/loop/build.sh build --release -p shangyi-cli）" >&2
+if [ -z "$SHANGYI_BIN_RESOLVED" ] || [ ! -x "$SHANGYI_BIN_RESOLVED" ]; then
+  echo "✗ 错误：找不到可执行商奕确定性二进制（未发现 SHANGYI_BIN / ~/.shangyi/bin/shangyi / PATH shangyi）。" >&2
+  echo "  为避免工作台退化成无工具纯对话，拒绝继续拉起裸聊实例。" >&2
+  echo "  请先构建或安装后重试：" >&2
+  echo "    1) tools/loop/build.sh build --release -p shangyi-cli && /tmp/shangyi-target/release/shangyi start" >&2
+  echo "    2) 或 cargo install --path shangyi/crates/shangyi-cli --root ~/.shangyi && ~/.shangyi/bin/shangyi start" >&2
   exit 3
 fi
 
@@ -146,11 +183,13 @@ if best:
 fi
 
 echo "== 起商奕 Web 工作台实例 (port $PORT) =="
-LOG="/tmp/shangyi-web-verify.log"
+LOG="$SHANGYI_HOME_DIR/runtime/dsh-web.log"
+URL_FILE="$SHANGYI_HOME_DIR/runtime/workbench-url.txt"
 install -m 600 /dev/null "$LOG"
 (
   cd "$ROOT"
   export DSH_HOME="$DSH_HOME_DIR"
+  export SHANGYI_HOME="$SHANGYI_HOME_DIR"
   export SHANGYI_ROOT="$ROOT"
   export SHANGYI_SKILL_DIR="$ROOT/dsh/skills"
   export SHANGYI_BIN="$SHANGYI_BIN_RESOLVED"
@@ -167,6 +206,15 @@ if [ -z "${URL:-}" ]; then
   exit 1
 fi
 chmod 600 "$LOG" 2>/dev/null || true
-install -m 600 /dev/null /tmp/shangyi-url.txt
-printf '%s\n' "$URL" > /tmp/shangyi-url.txt
-echo "✓ 商奕 Web 工作台已就绪（port $PORT，鉴权入口已写入 /tmp/shangyi-url.txt）"
+install -m 600 /dev/null "$URL_FILE"
+printf '%s\n' "$URL" > "$URL_FILE"
+echo "✓ 商奕 Web 工作台已就绪（port $PORT）"
+echo "  访问地址: $URL"
+echo "  地址记录: $URL_FILE"
+if [ "$DO_OPEN" = "1" ] && [ "${CI:-}" != "true" ] && [ -z "${SHANGYI_NO_OPEN:-}" ]; then
+  if command -v open >/dev/null 2>&1; then
+    open "$URL" >/dev/null 2>&1 || true
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$URL" >/dev/null 2>&1 || true
+  fi
+fi

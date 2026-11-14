@@ -230,6 +230,9 @@ function makeFetch({ failCases = false, failCards = false, kb = 'ok' } = {}) {
       if (kb === 'error') return { ok: false, status: 404, json: async () => ({ ok: false, error: 'not found' }) }
       return { ok: true, status: 200, json: async () => FIX_KB }
     }
+    if (u.startsWith('/api/shangyi/health')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, binary: { found: true, path: '/usr/local/bin/shangyi' }, mcpTools: { status: 'ok', count: 38 }, problems: [] }) }
+    }
     return { ok: false, status: 404, json: async () => ({ ok: false, error: 'unknown ' + u }) }
   }
 }
@@ -533,7 +536,7 @@ check('中栏是 tablist 且默认选中概览', () => {
   const tabs = findByClass(tree, 'sy-tabs')
   assert.equal(tabs.length, 1)
   const tabItems = findByClass(tabs[0], 'sy-tab')
-  assert.equal(tabItems.length, 4)
+  assert.equal(tabItems.length, 6)
 })
 check('检查器渲染了确认点', () => {
   const right = findByClass(tree, 'sy-wb-right')
@@ -674,10 +677,163 @@ check('P0 #4: badLines === 0 时不误显「坏行 0」，> 0 时如实提示，
   assert.ok(trailText.includes('关口 1 · 立案边界（cp1）') && trailText.includes('未取得'), trailText)
 })
 
+check('M2 #5: 空案例渲染新手引导与 4 个可点击示例提问卡', () => {
+  let pickedPrompt = null
+  const vmEmpty = vmOf({
+    cases: { phase: 'ok', items: [], error: null },
+    actions: Object.assign({}, stubActions, {
+      useExamplePrompt(p) { pickedPrompt = p }
+    })
+  })
+  const treeEmpty = SYView.renderPanel(vmEmpty)
+  const t = textOf(treeEmpty)
+  assert.ok(t.includes('欢迎使用商奕') && t.includes('输入处境与底线') && t.includes('核对证据与关口'))
+  const exCards = findByClass(treeEmpty, 'sy-ex-card')
+  assert.equal(exCards.length, 4, '应渲染 4 个示例场景卡片')
+  exCards[0].props.onClick()
+  assert.ok(pickedPrompt && pickedPrompt.includes('9.9'), '点击示例应传回对应提问文本')
+})
+
+check('M2 #5: 精算 tab 分离押金与未知项并严禁把 null 填 0', () => {
+  const costCards = SYData.normalizeCards(Object.assign({}, FIX_CARDS, {
+    costs: {
+      scenarios: [{
+        scenario_id: 'store_a',
+        scenario: 'A 铺位',
+        currency: 'CNY',
+        listed_upfront_cash: 78000,
+        listed_upfront_cash_expense: 60000,
+        listed_refundable_deposits: 18000,
+        listed_monthly_fixed_cost: 6000,
+        costs_complete: false,
+        amounts_complete: false,
+        horizon_totals: {
+          months: 12,
+          listed_cash_expense: 132000,
+          listed_cash_outflow_before_deposit_return: 150000
+        },
+        items: [
+          { name: '房租月付', treatment: 'cash_expense', normalized_period: 'month', normalized_amount: 6000, source: '房东报价' },
+          { name: '消防改造', treatment: 'cash_expense', normalized_period: 'once', normalized_amount: null, missing_amount_reason: '待物业复勘', source: '待核' }
+        ]
+      }],
+      missingItems: [{ scenario: 'A 铺位', item: '消防改造', reason: '待物业复勘' }],
+      constraintCheck: { constraint_revision: 2, eligible_scenario_ids: [], comparison_only_scenario_ids: [], unknown_scenario_ids: ['store_a'], note: '存在未知费用项暂不放行' }
+    }
+  }))
+  const t = textOf(SYView.costs(vmOf(Object.assign({}, vmData, { cards: { phase: 'ok', data: costCards, error: null }, tab: 'costs' }))))
+  assert.ok(t.includes('A 铺位') && t.includes('78,000 CNY') && t.includes('18,000 CNY'), t)
+  assert.ok(t.includes('未取得') && t.includes('待物业复勘'), '缺失金额必须显式标为未取得')
+  assert.ok(t.includes('未知暂不放行 1') && t.includes('rev.2'))
+})
+
+check('M2 #5: 假设 tab 渲染四类证据来源徽标与证据缺口清单', () => {
+  const assumCards = SYData.normalizeCards(Object.assign({}, FIX_CARDS, {
+    assumptions: {
+      players: [{ id: 'us', name: '我方', vnRole: 'focal', relation: 'Player' }],
+      params: [
+        { key: 'p1', name: '门店租金', valueText: '6000', unit: '元/月', sourceKind: 'user_confirmed', sourceDetail: '用户报价' },
+        { key: 'p2', name: '商圈人口', valueText: '3.2万', unit: '人', sourceKind: 'public_data', sourceDetail: '统计公报' },
+        { key: 'p3', name: '复购率', valueText: '[0.2, 0.35]', sourceKind: 'industry_prior', sourceDetail: '行业先验' },
+        { key: 'p4', name: '竞对响应延迟', valueText: '14', unit: '天', sourceKind: 'assumed', sourceDetail: '待核假设' }
+      ],
+      counts: { user_confirmed: 1, public_data: 1, industry_prior: 1, assumed: 1 },
+      gaps: ['参数「竞对响应延迟」来源为 assumed，未经确认不得静默进入正式求解']
+    }
+  }))
+  const t = textOf(SYView.assumptions(vmOf(Object.assign({}, vmData, { cards: { phase: 'ok', data: assumCards, error: null }, tab: 'assumptions' }))))
+  assert.ok(t.includes('用户当面确认') && t.includes('公开数据') && t.includes('行业先验（非本案实证）') && t.includes('未确认假设（禁止入解）'), t)
+  assert.ok(t.includes('待核清假设与证据缺口（铁律 2）'))
+})
+
+check('M2 #5: 证据 tab 隔离 sandbox_exec 且阻止不安全 javascript: 外链', () => {
+  const evCards = SYData.normalizeCards(Object.assign({}, FIX_CARDS, {
+    evidence: {
+      checkpoints: [{ id: 'cp1', status: 'answered', actor: 'user', answers: ['批准：继续建模'], answeredAt: '2026-11-13T10:00:00Z' }],
+      sources: [
+        { url: 'https://example.com/report', title: '公开行业年报', tool: 'web_search' },
+        { url: 'javascript:alert(1)', title: '恶意协议', tool: 'web_fetch' }
+      ],
+      poiSurveys: [],
+      researchRecords: [],
+      tools: [{ name: 'sandbox_exec', status: 'ok', exploratory: true, detail: '探索性沙箱试算' }],
+      exploratoryCalls: 1
+    }
+  }))
+  const rendered = SYView.evidence(vmOf(Object.assign({}, vmData, { cards: { phase: 'ok', data: evCards, error: null }, tab: 'evidence' })))
+  const t = textOf(rendered)
+  assert.ok(t.includes('sandbox_exec × 1') && t.includes('actor=user') && t.includes('公开行业年报'))
+  const html = JSON.stringify(rendered)
+  assert.ok(!html.includes('"href":"javascript:'), '绝不能为 javascript: 协议生成可点击 <a> 标签')
+})
+
+check('M2 #5: Markdown 纯 React 渲染剥离 frontmatter、防 XSS 并支持 [[wiki-link]] 跳转与导出 Markdown 报告', () => {
+  let wikiTarget = null
+  const md = [
+    '---',
+    'id: nash_eq',
+    'name: 纳什均衡',
+    'kind: theory',
+    'summary: 无人有动机单方面偏离的策略组合',
+    '---',
+    '# 核心原理',
+    '',
+    '参考 [[backward_induction|逆向归纳法]] 与 [安全外链](https://example.com) 及 [危险脚本](javascript:alert(1))。',
+    '',
+    '| 列1 | 列2 |',
+    '|---|---|',
+    '| A | <script>xss</script> |'
+  ].join('\n')
+  const treeMd = SYView.Markdown({ markdown: md, onOpenWiki: (tgt) => { wikiTarget = tgt } })
+  const t = textOf(treeMd)
+  assert.ok(t.includes('核心理论') && t.includes('无人有动机单方面偏离') && !t.includes('id: nash_eq\n'), t)
+  assert.ok(t.includes('<script>xss</script>'), '字面文本应由 React 文本节点安全转义渲染')
+  const serialized = JSON.stringify(treeMd)
+  assert.ok(!serialized.includes('dangerouslySetInnerHTML'))
+  assert.ok(!serialized.includes('"href":"javascript:'))
+  const wikiBtns = findByClass(treeMd, 'sy-md-wiki')
+  assert.equal(wikiBtns.length, 1)
+  wikiBtns[0].props.onClick()
+  assert.equal(wikiTarget, 'backward_induction')
+  assert.equal(SYData.resolveKbSlug('nash_eq', [{ slug: 'nash-eq', id: 'nash_eq', title: '纳什均衡' }]), 'nash-eq')
+
+  const repMd = SYData.exportReportMarkdown(SYData.normalizeCards(Object.assign({}, FIX_CARDS, {
+    evidence: { exploratoryCalls: 2 },
+    conclusion: { headline: '维持原价优先', recommend: { actions: [{ action: '推出会员储值', rationale: '提升留存' }], do_not: ['全线降价'] } }
+  })))
+  assert.ok(repMd.includes('探索性工具隔离声明') && repMd.includes('维持原价优先') && repMd.includes('推出会员储值'))
+})
+
+check('M2 #7: /api/shangyi/health 异常时在工作台顶部渲染阻断告警与修复命令', () => {
+  const vmBad = vmOf(Object.assign({}, vmData, {
+    health: {
+      phase: 'ok',
+      data: {
+        ok: false,
+        problems: [{
+          code: 'missing_binary',
+          severity: 'blocking',
+          title: '未找到商奕确定性求解内核（shangyi 二进制）',
+          detail: '缺少内核将无法调用 MCP 工具。',
+          fixCommands: ['shangyi start']
+        }]
+      },
+      error: null
+    }
+  }))
+  const badPanel = SYView.renderPanel(vmBad)
+  const alerts = findByClass(badPanel, 'sy-health-alert')
+  assert.equal(alerts.length, 1)
+  assert.ok(textOf(alerts[0]).includes('未找到商奕确定性求解内核') && textOf(alerts[0]).includes('shangyi start'))
+
+  const vmOk = vmOf(Object.assign({}, vmData, { health: { phase: 'ok', data: { ok: true, problems: [] }, error: null } }))
+  assert.equal(findByClass(SYView.renderPanel(vmOk), 'sy-health-alert').length, 0)
+})
+
 // ── 汇总 ────────────────────────────────────────────────────
 console.log('')
 if (failures) {
   console.log('✗ ' + failures + ' 项失败')
   process.exit(1)
 }
-console.log('✓ 全部通过（' + (registrations.length + 1) + ' 组注册 / 31 项断言）')
+console.log('✓ 全部通过（' + (registrations.length + 1) + ' 组注册 / 37 项断言）')

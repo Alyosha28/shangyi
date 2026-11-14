@@ -124,7 +124,7 @@ function exprText(v) {
   return String(v)
 }
 
-/** 把一次 gamespec_build 的入参解析成 spec（兼容模型把参数塞进 arguments 字符串的形状）。 */
+/** 把一次 gamespec_build 的入参解析成 spec（兼容模型把参数塞进 arguments 字符串或 spec 键的形状）。 */
 function unwrapSpec(argsRaw) {
   if (!argsRaw) return null
   let v
@@ -133,18 +133,28 @@ function unwrapSpec(argsRaw) {
   for (let i = 0; i < 3 && v && typeof v === 'object' && typeof v.arguments === 'string'; i++) {
     try { v = JSON.parse(v.arguments) } catch { break }
   }
+  if (v && typeof v === 'object' && v.spec && typeof v.spec === 'object' && !v.players && !v.params) {
+    v = v.spec
+  }
   return v && typeof v === 'object' ? v : null
 }
 
-/** 合并所有 gamespec_build 入参（后者覆盖前者），得到模型最终想建的博弈骨架。 */
+/** 合并所有 gamespec_build 入参（支持 merge:true 增量构建与完整覆盖），得到模型最终想建的博弈骨架。 */
 function mergeSpecs(specs) {
   const out = { players: null, strategies: null, payoffs: null, params: null, game_id: null }
   for (const s of specs) {
     if (!s) continue
+    const inc = s.merge === true
     if (Array.isArray(s.players) && s.players.length) out.players = s.players
-    if (s.strategies && typeof s.strategies === 'object' && Object.keys(s.strategies).length) out.strategies = s.strategies
-    if (s.payoffs && typeof s.payoffs === 'object') out.payoffs = s.payoffs
-    if (s.params && typeof s.params === 'object') out.params = s.params
+    if (s.strategies && typeof s.strategies === 'object' && Object.keys(s.strategies).length) {
+      out.strategies = inc && out.strategies ? { ...out.strategies, ...s.strategies } : s.strategies
+    }
+    if (s.payoffs && typeof s.payoffs === 'object') {
+      out.payoffs = inc && out.payoffs ? { ...out.payoffs, ...s.payoffs } : s.payoffs
+    }
+    if (s.params && typeof s.params === 'object') {
+      out.params = inc && out.params ? { ...out.params, ...s.params } : s.params
+    }
     if (typeof s.game_id === 'string' && s.game_id) out.game_id = s.game_id
   }
   return out
@@ -201,54 +211,365 @@ function matrixCard(spec) {
   }
 }
 
+function parseJsonSafe(raw) {
+  if (raw == null) return null
+  if (typeof raw === 'object') return raw
+  if (typeof raw !== 'string' || !raw.trim()) return null
+  try { return JSON.parse(raw) } catch { return null }
+}
+
+function summarizeParamSource(src) {
+  if (!src || typeof src !== 'object') return { sourceKind: 'unknown', sourceDetail: '' }
+  const kind = String(src.kind || 'unknown')
+  if (kind === 'user_confirmed') {
+    return {
+      sourceKind: kind,
+      checkpoint: src.checkpoint || null,
+      sourceDetail: src.checkpoint ? `关口 ${src.checkpoint}` : '用户当面确认'
+    }
+  }
+  if (kind === 'confirmed_assumption') {
+    const parts = [src.checkpoint ? `关口 ${src.checkpoint}` : '', src.basis || ''].filter(Boolean)
+    return {
+      sourceKind: kind,
+      checkpoint: src.checkpoint || null,
+      basis: src.basis || null,
+      sourceDetail: parts.join(' · ')
+    }
+  }
+  if (kind === 'public_data') {
+    return { sourceKind: kind, provenance: src.provenance || null, sourceDetail: src.provenance || '公开数据' }
+  }
+  if (kind === 'industry_prior') {
+    return { sourceKind: kind, priorRef: src.prior_ref || null, sourceDetail: src.prior_ref || '行业先验（非本案实证）' }
+  }
+  if (kind === 'assumed') {
+    return { sourceKind: kind, note: src.note || null, sourceDetail: src.note || '未确认假设（禁止入解）' }
+  }
+  if (kind === 'derived') {
+    return { sourceKind: kind, note: src.note || null, sourceDetail: src.note || '引擎派生' }
+  }
+  return { sourceKind: kind, sourceDetail: '' }
+}
+
+function rewindProjectionState(st, toPhase) {
+  const rank = PHASE_ORDER_INDEX[toPhase]
+  if (typeof rank !== 'number') return
+  if (rank <= 2) st.specBuilds = []
+  if (rank <= 3) st.solve = null
+  if (rank <= 4) st.fuse = null
+  if (rank <= 5) st.consequence = null
+  if (rank <= 6) st.discovery = null
+  if (rank <= 7) {
+    st.recommend = null
+    st.conditional = null
+    st.scopedResult = null
+  }
+  if (rank <= 8) st.reportModel = null
+  if (rank === 0) {
+    st.scope = null
+    st.scopeReason = null
+    st.costs.clear()
+    st.constraints = []
+    st.constraintCheck = null
+  }
+  for (const cp of st.checkpointTimeline) {
+    if (cp.status === 'pending') {
+      const cpRank = PHASE_ORDER_INDEX[cp.phase]
+      if ((typeof cpRank === 'number' && cpRank > rank) || toPhase === 'intake') {
+        cp.status = 'rewound'
+      }
+    }
+  }
+}
+
+function resetProjectionForFollowup(st) {
+  st.scope = null
+  st.scopeReason = null
+  st.specBuilds = []
+  st.solve = null
+  st.fuse = null
+  st.consequence = null
+  st.discovery = null
+  st.recommend = null
+  st.reportModel = null
+  st.scopedResult = null
+  st.conditional = null
+  st.costs.clear()
+  st.constraints = []
+  st.constraintCheck = null
+  st.poiSurveys = []
+  st.researchRecords = []
+  st.failures = []
+  for (const cp of st.checkpointTimeline) {
+    if (cp.status === 'pending') cp.status = 'rewound'
+  }
+}
+
 /** 案例日志 → 卡片数据。纯函数（除读盘外），便于对拍。 */
 export function projectCase(caseRef = 'latest', home = defaultHome()) {
   const target = resolveCaseTarget(caseRef, home)
 
   const { events, badLines } = readCase(target.log)
   const started = new Map()
-  const calls = []
-  for (const e of events) if (e.type === 'tool_call_started') started.set(e.call_id, e)
-  for (const e of events) {
-    if (e.type !== 'tool_call_finished') continue
-    const s = started.get(e.call_id) || {}
-    calls.push({ name: s.name || '?', args: s.arguments || '', outcome: e.outcome || {} })
+  const st = {
+    scope: null,
+    scopeReason: null,
+    specBuilds: [],
+    solve: null,
+    fuse: null,
+    consequence: null,
+    discovery: null,
+    recommend: null,
+    reportModel: null,
+    scopedResult: null,
+    conditional: null,
+    costs: new Map(),
+    constraints: [],
+    constraintCheck: null,
+    poiSurveys: [],
+    researchRecords: [],
+    webSources: new Map(),
+    kbQueries: [],
+    checkpointTimeline: [],
+    toolsLog: [],
+    failures: [],
+    exploratoryCalls: 0,
+    phases: [],
+    checkpointsAnswered: [],
+    callsCount: 0,
+    tokens: 0,
+    turns: 0
   }
 
-  const specBuilds = calls.filter((c) => c.name === 'gamespec_build' && c.outcome.status === 'ok').map((c) => unwrapSpec(c.args))
-  const spec = mergeSpecs(specBuilds)
+  for (const e of events) {
+    if (!e || !e.type) continue
+    if (e.type === 'phase_entered' && e.to) st.phases.push(e.to)
+    else if (e.type === 'phase_rewound' && e.to) {
+      rewindProjectionState(st, e.to)
+      st.phases.push(`回退→${e.to}`)
+    } else if (e.type === 'followup_task_started') {
+      resetProjectionForFollowup(st)
+    } else if (e.type === 'task_scope_selected' && e.scope) {
+      st.scope = e.scope
+      st.scopeReason = e.reason || null
+    } else if (e.type === 'scoped_task_completed' && e.result) {
+      if (e.result.scope) st.scope = e.result.scope
+      st.scopedResult = e.result
+      if (e.result.conditional) st.conditional = e.result.conditional
+      if (Array.isArray(e.result.source_urls)) {
+        for (const u of e.result.source_urls) {
+          if (u && String(u).trim() && !st.webSources.has(u)) {
+            st.webSources.set(u, { url: String(u), title: null, snippet: null, tool: 'scoped_task_completed' })
+          }
+        }
+      }
+    } else if (e.type === 'checkpoint_opened' && e.id) {
+      for (const prev of st.checkpointTimeline) {
+        if (prev.id === e.id && prev.status === 'pending') prev.status = 'superseded'
+      }
+      st.checkpointTimeline.push({
+        id: String(e.id),
+        phase: e.phase || null,
+        items: Array.isArray(e.items) ? e.items.map(String) : [],
+        status: 'pending',
+        answers: [],
+        actor: null,
+        openedAt: e.at || null,
+        answeredAt: null
+      })
+    } else if (e.type === 'checkpoint_answered' && e.id) {
+      st.checkpointsAnswered.push(e.id)
+      const first = Array.isArray(e.answers) && e.answers.length ? String(e.answers[0] || '') : ''
+      const isFollowup = first.startsWith('追问：')
+      for (let i = st.checkpointTimeline.length - 1; i >= 0; i--) {
+        const cp = st.checkpointTimeline[i]
+        if (cp.id === e.id && cp.status === 'pending') {
+          if (Array.isArray(e.answers)) cp.answers.push(...e.answers.map(String))
+          cp.actor = e.user_actor || null
+          if (!isFollowup) {
+            cp.status = 'answered'
+            cp.answeredAt = e.at || null
+          }
+          break
+        }
+      }
+    } else if (e.type === 'token_usage') {
+      st.tokens += (e.input_tokens || 0) + (e.output_tokens || 0)
+    } else if (e.type === 'turn_started') {
+      st.turns += 1
+    } else if (e.type === 'tool_call_started') {
+      started.set(e.call_id, e)
+      if (e.name === 'sandbox_exec') st.exploratoryCalls += 1
+    } else if (e.type === 'tool_call_finished') {
+      st.callsCount += 1
+      const s = started.get(e.call_id) || {}
+      const name = s.name || '?'
+      const outcome = e.outcome || {}
+      const status = outcome.status || 'unknown'
+      const exploratory = name === 'sandbox_exec'
 
-  const solves = calls
-    .filter((c) => c.name === 'solve_equilibria' && c.outcome.status === 'ok')
-    .map((c) => { try { return JSON.parse(c.outcome.output) } catch { return null } })
-    .filter(Boolean)
-  const solve = solves.length ? solves[solves.length - 1] : null
+      st.toolsLog.push({
+        callId: e.call_id || null,
+        name,
+        status,
+        exploratory,
+        at: e.at || s.at || null,
+        detail: status === 'ok'
+          ? (exploratory ? '探索性沙箱试算（已隔离排除出正式结论）' : '')
+          : String(outcome.error ?? outcome.detail ?? outcome.output ?? '').slice(0, 300)
+      })
 
-  const fuses = calls
-    .filter((c) => c.name === 'select_fuse' && c.outcome.status === 'ok')
-    .map((c) => { try { return JSON.parse(c.outcome.output) } catch { return null } })
-    .filter(Boolean)
-  const fuse = fuses.length ? fuses[fuses.length - 1] : null
+      if (status !== 'ok') {
+        st.failures.push({
+          tool: name,
+          status,
+          detail: String(outcome.error ?? outcome.detail ?? outcome.output ?? '').slice(0, 600)
+        })
+        continue
+      }
 
-  const failures = calls
-    .filter((c) => c.outcome.status !== 'ok')
-    .slice(-5)
-    .map((c) => ({
-      tool: c.name,
-      status: c.outcome.status,
-      detail: String(c.outcome.error ?? c.outcome.detail ?? c.outcome.output ?? '').slice(0, 600)
-    }))
+      // 铁律 1：sandbox_exec 属于 TrustLevel::Exploratory，绝不写入任何权威业务/博弈状态
+      if (exploratory) continue
 
-  // 注意：phase_entered 的字段是 from/to（不是 phase）；旧案例没有该事件，phases 为空。
-  const phases = events.filter((e) => e.type === 'phase_entered').map((e) => e.to).filter(Boolean)
-  const checkpoints = events.filter((e) => e.type === 'checkpoint_answered').map((e) => e.id)
-  const scope = inferScope(events)
-  const tokens = events.filter((e) => e.type === 'token_usage').reduce((acc, e) => acc + (e.input_tokens || 0) + (e.output_tokens || 0), 0)
-  const turns = events.filter((e) => e.type === 'turn_started').length
+      const argsObj = unwrapSpec(s.arguments || '')
+      const parsedOut = parseJsonSafe(outcome.output)
+      if (name === 'gamespec_build') {
+        if (argsObj) st.specBuilds.push(argsObj)
+      } else if (name === 'solve_equilibria' && parsedOut) {
+        st.solve = parsedOut
+      } else if (name === 'select_fuse' && parsedOut) {
+        st.fuse = parsedOut
+      } else if (name === 'consequence_predict' && parsedOut) {
+        st.consequence = parsedOut
+      } else if (name === 'discover_satisfice' && parsedOut) {
+        st.discovery = parsedOut
+      } else if (name === 'recommend_build' && parsedOut) {
+        st.recommend = parsedOut
+      } else if (name === 'report_render' && parsedOut && parsedOut.report) {
+        st.reportModel = parsedOut.report
+      } else if (name === 'business_cost' && parsedOut) {
+        const key = String(parsedOut.scenario_id || parsedOut.scenario || e.call_id || st.costs.size)
+        st.costs.set(key, parsedOut)
+      } else if (name === 'constraint_register' && parsedOut) {
+        st.constraints.push(parsedOut)
+      } else if (name === 'constraint_check' && parsedOut) {
+        st.constraintCheck = parsedOut
+      } else if (name === 'conditional_analysis' && parsedOut) {
+        st.scopedResult = parsedOut
+        if (parsedOut.conditional) st.conditional = parsedOut.conditional
+      } else if (name === 'poi_survey' && parsedOut) {
+        st.poiSurveys.push(parsedOut)
+      } else if (name === 'research_record' && parsedOut) {
+        st.researchRecords.push(parsedOut)
+      } else if (name === 'web_search' && parsedOut && Array.isArray(parsedOut.results)) {
+        for (const item of parsedOut.results) {
+          if (item && item.url) {
+            st.webSources.set(item.url, {
+              url: String(item.url),
+              title: item.title ? String(item.title) : null,
+              snippet: item.snippet ? String(item.snippet) : null,
+              tool: 'web_search'
+            })
+          }
+        }
+      } else if (name === 'web_fetch') {
+        const u = (parsedOut && parsedOut.url) || (argsObj && argsObj.url) || null
+        if (u) {
+          st.webSources.set(u, {
+            url: String(u),
+            title: (parsedOut && parsedOut.title) ? String(parsedOut.title) : null,
+            snippet: null,
+            tool: 'web_fetch'
+          })
+        }
+      } else if (name === 'kb_retrieve' && argsObj && argsObj.query) {
+        st.kbQueries.push({ query: String(argsObj.query), at: e.at || s.at || null })
+      }
+    }
+  }
+
+  const spec = mergeSpecs(st.specBuilds)
   const progress = inferProgress(events)
 
   let header = null
   try { header = JSON.parse(fs.readFileSync(path.join(target.dir, 'header.json'), 'utf8')) } catch { /* 老案例可能没有 */ }
+
+  // 提取核心参数与四类证据来源
+  const paramCounts = {
+    user_confirmed: 0,
+    confirmed_assumption: 0,
+    public_data: 0,
+    industry_prior: 0,
+    assumed: 0,
+    derived: 0,
+    unknown: 0
+  }
+  const paramsList = []
+  const gaps = []
+  if (spec.params && typeof spec.params === 'object') {
+    for (const [k, p] of Object.entries(spec.params)) {
+      if (!p || typeof p !== 'object') continue
+      const srcInfo = summarizeParamSource(p.source)
+      if (Object.prototype.hasOwnProperty.call(paramCounts, srcInfo.sourceKind)) {
+        paramCounts[srcInfo.sourceKind] += 1
+      } else {
+        paramCounts.unknown += 1
+      }
+      if (srcInfo.sourceKind === 'assumed' || srcInfo.sourceKind === 'unknown') {
+        gaps.push(`参数「${p.name || k}」来源为 ${srcInfo.sourceKind}，未经确认不得静默进入正式求解`)
+      }
+      paramsList.push({
+        key: k,
+        name: p.name || k,
+        valueText: exprText(p.value),
+        unit: p.unit || null,
+        ...srcInfo
+      })
+    }
+  }
+
+  const costScenarios = Array.from(st.costs.values())
+  const missingCostItems = []
+  for (const sc of costScenarios) {
+    if (Array.isArray(sc.items)) {
+      for (const it of sc.items) {
+        if (it && (it.normalized_amount === null || it.normalized_amount === undefined)) {
+          const reason = it.missing_amount_reason || '未取得具体金额'
+          missingCostItems.push({
+            scenario: sc.scenario || sc.scenario_id || '当前方案',
+            item: it.name || '未命名费用',
+            reason
+          })
+          gaps.push(`${sc.scenario || '方案'}·${it.name || '费用项'}：未取得（${reason}）`)
+        }
+      }
+    }
+  }
+  if (st.scopedResult && Array.isArray(st.scopedResult.missing)) {
+    for (const m of st.scopedResult.missing) if (m) gaps.push(String(m))
+  }
+  if (st.conditional && Array.isArray(st.conditional.limitations)) {
+    for (const l of st.conditional.limitations) if (l) gaps.push(String(l))
+  }
+
+  const bossSection = st.reportModel && Array.isArray(st.reportModel.sections)
+    ? st.reportModel.sections.find((sec) => sec && sec.layer === 'boss_page')
+    : null
+  const bossHeadline = bossSection && Array.isArray(bossSection.paragraphs) && bossSection.paragraphs.length
+    ? bossSection.paragraphs[0]
+    : null
+
+  const hasEngineResult = Boolean(
+    st.solve ||
+    st.fuse ||
+    st.consequence ||
+    st.discovery ||
+    st.recommend ||
+    st.reportModel ||
+    costScenarios.length ||
+    st.scopedResult
+  )
 
   return {
     source: { path: target.log, caseId: target.caseId, mtime: new Date(target.mtime).toISOString(), badLines },
@@ -258,19 +579,75 @@ export function projectCase(caseRef = 'latest', home = defaultHome()) {
       playbook: header?.playbook_id || null,
       created_at: header?.created_at || null,
       events: events.length,
-      turns,
-      tokens,
-      scope,
-      phases,
-      checkpoints,
-      tools: calls.length
+      turns: st.turns,
+      tokens: st.tokens,
+      scope: st.scope,
+      phases: st.phases,
+      checkpoints: st.checkpointsAnswered,
+      tools: st.callsCount
     },
     pendingCheckpoint: progress.pendingCheckpoint,
     pendingCheckpointDetail: progress.pendingCheckpointDetail,
     matrix: matrixCard(spec),
-    solve: solve ? { completeness: solve.completeness || null, route: solve.route || null, equilibria: solve.equilibria || [], refinement: solve.refinement || null } : null,
-    selection: fuse ? { entries: fuse.entries || [], confidence: fuse.confidence || null, divergences: fuse.divergences || [] } : null,
-    failures
+    solve: st.solve
+      ? {
+          completeness: st.solve.completeness || null,
+          route: st.solve.route || null,
+          equilibria: st.solve.equilibria || [],
+          refinement: st.solve.refinement || null
+        }
+      : null,
+    selection: st.fuse
+      ? {
+          entries: st.fuse.entries || [],
+          confidence: st.fuse.confidence || null,
+          divergences: st.fuse.divergences || []
+        }
+      : null,
+    failures: st.failures.slice(-5),
+    scopeDetail: {
+      scope: st.scope,
+      reason: st.scopeReason,
+      scopedResult: st.scopedResult,
+      conditional: st.conditional
+    },
+    costs: {
+      scenarios: costScenarios,
+      constraints: st.constraints,
+      constraintCheck: st.constraintCheck,
+      missingItems: missingCostItems
+    },
+    assumptions: {
+      players: Array.isArray(spec.players)
+        ? spec.players.map((p) => ({
+            id: String(p.id ?? p.name ?? '?'),
+            name: String(p.name ?? p.id ?? '?'),
+            vnRole: p.vn_role || null,
+            relation: p.relation_to_game || null
+          }))
+        : [],
+      params: paramsList,
+      counts: paramCounts,
+      gaps
+    },
+    evidence: {
+      checkpoints: st.checkpointTimeline,
+      sources: Array.from(st.webSources.values()),
+      poiSurveys: st.poiSurveys,
+      researchRecords: st.researchRecords,
+      kbQueries: st.kbQueries,
+      tools: st.toolsLog.slice(-40),
+      exploratoryCalls: st.exploratoryCalls
+    },
+    conclusion: {
+      headline: (st.recommend && st.recommend.headline) || (st.scopedResult && st.scopedResult.summary) || bossHeadline || null,
+      recommend: st.recommend,
+      consequence: st.consequence,
+      discovery: st.discovery,
+      reportModel: st.reportModel,
+      hasEngineResult,
+      hasExploratoryOnly: st.exploratoryCalls > 0 && !hasEngineResult
+    }
   }
 }
 
@@ -685,35 +1062,49 @@ function walkMd(dir, prefix = '', out = []) {
 }
 
 /**
- * 知识库索引。
- * @param {{kbDir?: string|null}} opts 可选注入 kb 目录（测试用）；缺省用仓库内 shangyi/kb。
+ * 知识库索引（合并仓库内 shangyi/kb 与用户 $SHANGYI_HOME/kb）。
+ * @param {{kbDir?: string|null, home?: string}} opts 可选注入 kb 目录（测试用）；缺省用仓库内 shangyi/kb。
  * @returns {{ok: boolean, docs: Array, error?: string}}
  */
 export function listKb(opts = {}) {
   const dir = opts.kbDir !== undefined ? opts.kbDir : KB_DIR
   if (!dir) return { ok: false, docs: [], error: '找不到仓库内的 shangyi/kb（可设 SHANGYI_ROOT 指定仓库根）' }
-  const files = walkMd(dir).sort()
-  const docs = []
-  for (const rel of files) {
-    let text = ''
-    try { text = fs.readFileSync(path.join(dir, rel), 'utf8') } catch { continue }
-    const fm = parseFrontMatter(text)
-    const heading = firstHeading(text)
-    const base = path.basename(rel, '.md')
-    const firstDir = rel.includes('/') ? rel.split('/')[0] : null
-    docs.push({
-      slug: slugOf(rel),
-      // title 来源优先级：front-matter.name > 首个 # 标题 > 文件名（见本节顶部口径说明）
-      title: fm.name || heading || base,
-      group: fm.kind || firstDir || null,
-      path: 'shangyi/kb/' + rel.split(path.sep).join('/'),
-      id: fm.id || base,
-      kind: fm.kind || null,
-      summary: fm.summary || null,
-      tags: fm.tags || null,
-      heading
-    })
+
+  const dirs = [{ root: dir, userAdded: false }]
+  if (opts.kbDir === undefined) {
+    const userKb = path.join(opts.home !== undefined ? opts.home : defaultHome(), 'kb')
+    try {
+      if (fs.statSync(userKb).isDirectory()) dirs.push({ root: userKb, userAdded: true })
+    } catch { /* 用户扩展库可选 */ }
   }
+
+  const bySlug = new Map()
+  for (const entry of dirs) {
+    const files = walkMd(entry.root).sort()
+    for (const rel of files) {
+      let text = ''
+      try { text = fs.readFileSync(path.join(entry.root, rel), 'utf8') } catch { continue }
+      const fm = parseFrontMatter(text)
+      const heading = firstHeading(text)
+      const base = path.basename(rel, '.md')
+      const firstDir = rel.includes('/') ? rel.split('/')[0] : null
+      const slug = slugOf(rel)
+      bySlug.set(slug, {
+        slug,
+        // title 来源优先级：front-matter.name > 首个 # 标题 > 文件名（见本节顶部口径说明）
+        title: fm.name || heading || base,
+        group: fm.kind || firstDir || null,
+        path: (entry.userAdded ? '~/.shangyi/kb/' : 'shangyi/kb/') + rel.split(path.sep).join('/'),
+        id: fm.id || base,
+        kind: fm.kind || null,
+        summary: fm.summary || null,
+        tags: fm.tags || null,
+        heading,
+        userAdded: entry.userAdded
+      })
+    }
+  }
+  const docs = Array.from(bySlug.values()).sort((a, b) => a.slug.localeCompare(b.slug))
   return { ok: true, docs }
 }
 
@@ -731,22 +1122,12 @@ function validateSlug(slug) {
   return { ok: true, bare: slug }
 }
 
-/**
- * 读单篇正文。越界（.. / 绝对路径 / 非 .md / 符号链接逃逸）一律拒绝。
- * @param {string} slug 形如 theory/xxx 或 xxx（不带 .md 亦可）
- * @param {{kbDir?: string|null}} opts 测试注入
- */
-export function readKbDoc(slug, opts = {}) {
-  const dir = opts.kbDir !== undefined ? opts.kbDir : KB_DIR
-  if (!dir) return { ok: false, status: 500, error: '找不到仓库内的 shangyi/kb' }
-  const v = validateSlug(slug)
-  if (!v.ok) return { ok: false, status: v.status, error: v.error }
-  const abs = path.join(dir, v.bare + '.md')
-  // 解析真实路径再比对，挡住符号链接逃逸
+function readKbDocFromRoot(rootDir, bare, userAdded) {
+  const abs = path.join(rootDir, bare + '.md')
   let real
   try { real = fs.realpathSync(abs) } catch { return { ok: false, status: 404, error: '没有这篇文档' } }
   let realRoot
-  try { realRoot = fs.realpathSync(dir) } catch { return { ok: false, status: 500, error: '知识库目录不可读' } }
+  try { realRoot = fs.realpathSync(rootDir) } catch { return { ok: false, status: 500, error: '知识库目录不可读' } }
   if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
     return { ok: false, status: 400, error: '路径越界' }
   }
@@ -757,12 +1138,227 @@ export function readKbDoc(slug, opts = {}) {
   const heading = firstHeading(markdown)
   return {
     ok: true,
-    slug: slugOf(path.relative(dir, real)),
+    slug: slugOf(path.relative(rootDir, real)),
     title: fm.name || heading || path.basename(real, '.md'),
     markdown,
     group: fm.kind || null,
     id: fm.id || null,
-    heading
+    summary: fm.summary || null,
+    tags: fm.tags || null,
+    heading,
+    userAdded
+  }
+}
+
+/**
+ * 读单篇正文。越界（.. / 绝对路径 / 非 .md / 符号链接逃逸）一律拒绝。
+ * @param {string} slug 形如 theory/xxx 或 xxx（不带 .md 亦可）
+ * @param {{kbDir?: string|null, home?: string}} opts 测试注入
+ */
+export function readKbDoc(slug, opts = {}) {
+  const dir = opts.kbDir !== undefined ? opts.kbDir : KB_DIR
+  if (!dir) return { ok: false, status: 500, error: '找不到仓库内的 shangyi/kb' }
+  const v = validateSlug(slug)
+  if (!v.ok) return { ok: false, status: v.status, error: v.error }
+
+  if (opts.kbDir === undefined) {
+    const userKb = path.join(opts.home !== undefined ? opts.home : defaultHome(), 'kb')
+    try {
+      if (fs.statSync(userKb).isDirectory()) {
+        const userHit = readKbDocFromRoot(userKb, v.bare, true)
+        if (userHit.ok || userHit.status === 400) return userHit
+      }
+    } catch { /* ignore */ }
+  }
+  return readKbDocFromRoot(dir, v.bare, false)
+}
+
+function isExecutableFile(filePath) {
+  if (!filePath || typeof filePath !== 'string') return false
+  try {
+    const st = fs.statSync(filePath)
+    if (!st.isFile()) return false
+    fs.accessSync(filePath, fs.constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function checkBinaryHealth(opts, home) {
+  if (opts.binPath !== undefined) {
+    if (isExecutableFile(opts.binPath)) {
+      return { found: true, path: opts.binPath, source: 'override', error: null }
+    }
+    return {
+      found: false,
+      path: opts.binPath || null,
+      source: 'missing',
+      error: opts.binPath
+        ? `指定的 shangyi 二进制不可执行或不存在：${opts.binPath}`
+        : '未检测到可执行 shangyi 二进制'
+    }
+  }
+  const envBin = process.env.SHANGYI_BIN && process.env.SHANGYI_BIN.trim()
+  if (envBin) {
+    if (isExecutableFile(envBin)) {
+      return { found: true, path: envBin, source: 'env', error: null }
+    }
+    return {
+      found: false,
+      path: envBin,
+      source: 'missing',
+      error: `环境变量 SHANGYI_BIN 指向的文件不可执行或不存在：${envBin}`
+    }
+  }
+  const candidates = [
+    { path: path.join(home, 'bin', 'shangyi'), source: 'home' },
+    { path: path.join(os.homedir(), '.shangyi', 'bin', 'shangyi'), source: 'home' },
+    { path: '/tmp/shangyi-target/release/shangyi', source: 'target' }
+  ]
+  const pathEnv = process.env.PATH || ''
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (dir && dir.trim()) candidates.push({ path: path.join(dir.trim(), 'shangyi'), source: 'path' })
+  }
+  for (const cand of candidates) {
+    if (isExecutableFile(cand.path)) {
+      return { found: true, path: cand.path, source: cand.source, error: null }
+    }
+  }
+  return {
+    found: false,
+    path: null,
+    source: 'missing',
+    error: '在 SHANGYI_BIN、~/.shangyi/bin/shangyi、/tmp/shangyi-target/release/shangyi 与 PATH 中均未找到可执行 shangyi 二进制。'
+  }
+}
+
+function inspectMcpToolsHealth(opts) {
+  if (Array.isArray(opts.mcpToolNames)) {
+    const hit = opts.mcpToolNames.filter((n) => String(n).startsWith('mcp__shangyi__'))
+    return {
+      status: hit.length > 0 ? 'ok' : 'missing',
+      count: hit.length,
+      sample: hit.slice(0, 8)
+    }
+  }
+  if (typeof opts.mcpToolCount === 'number') {
+    return {
+      status: opts.mcpToolCount > 0 ? 'ok' : 'missing',
+      count: opts.mcpToolCount,
+      sample: []
+    }
+  }
+  const readService = (obj, svc) => {
+    if (!obj) return undefined
+    if (typeof obj.get === 'function') {
+      try {
+        const hit = obj.get(svc)
+        if (hit !== undefined) return hit
+      } catch { /* ignore */ }
+    }
+    try { return obj[svc] } catch { return undefined }
+  }
+  const runtimes = [
+    opts.toolsRuntime,
+    readService(opts.c, 'tools'),
+    readService(opts.ctx, 'tools'),
+    readService(opts.c && opts.c.root, 'tools'),
+    readService(opts.ctx && opts.ctx.root, 'tools')
+  ]
+  for (const rt of runtimes) {
+    if (!rt || typeof rt.view !== 'function') continue
+    try {
+      const v = rt.view()
+      const keys = []
+      if (v && v.visible && typeof v.visible.keys === 'function') {
+        for (const k of v.visible.keys()) keys.push(String(k))
+      } else if (v && v.all && typeof v.all.keys === 'function') {
+        for (const k of v.all.keys()) keys.push(String(k))
+      }
+      const hit = keys.filter((k) => k.startsWith('mcp__shangyi__'))
+      return {
+        status: hit.length > 0 ? 'ok' : 'missing',
+        count: hit.length,
+        sample: hit.slice(0, 8)
+      }
+    } catch { /* ignore broken runtime view */ }
+  }
+  return { status: 'unknown', count: null, sample: [] }
+}
+
+/**
+ * 商奕确定性内核健康检查：检查 shangyi 可执行文件、MCP 工具注册状态、知识库与持久化案例目录。
+ */
+export function getHealthStatus(opts = {}) {
+  const home = opts.home !== undefined ? opts.home : defaultHome()
+  const binary = checkBinaryHealth(opts, home)
+  const kbRes = listKb({ kbDir: opts.kbDir, home })
+  const kb = {
+    ok: Boolean(kbRes.ok && kbRes.docs && kbRes.docs.length > 0),
+    dir: opts.kbDir !== undefined ? opts.kbDir : KB_DIR,
+    docCount: Array.isArray(kbRes.docs) ? kbRes.docs.length : 0,
+    error: kbRes.ok ? (kbRes.docs.length ? null : '知识库目录为空') : (kbRes.error || '知识库不可用')
+  }
+  const casesDir = path.join(home, 'cases')
+  let casesWritable = false
+  try {
+    const targetDir = fs.existsSync(casesDir) ? casesDir : (fs.existsSync(home) ? home : path.dirname(home))
+    fs.accessSync(targetDir, fs.constants.W_OK)
+    casesWritable = true
+  } catch { casesWritable = false }
+  const workspace = {
+    home,
+    casesDir,
+    casesWritable,
+    caseCount: listCases(home).length
+  }
+  const mcpTools = inspectMcpToolsHealth(opts)
+
+  const problems = []
+  if (!binary.found) {
+    problems.push({
+      code: 'missing_binary',
+      severity: 'blocking',
+      title: '未找到商奕确定性求解内核（shangyi 二进制）',
+      detail: `${binary.error} 缺少二进制时，博弈求解、成本精算、报告生成工具均无法运行；若强行对话将退化为纯模型自由发挥，违反铁律 1。`,
+      fixCommands: [
+        'tools/loop/build.sh build --release -p shangyi-cli',
+        'cargo install --path shangyi/crates/shangyi-cli --root ~/.shangyi',
+        'shangyi start'
+      ]
+    })
+  }
+  if (mcpTools.status === 'missing') {
+    problems.push({
+      code: 'mcp_tools_missing',
+      severity: 'blocking',
+      title: 'MCP 确定性工具组（mcp__shangyi__*）未连接',
+      detail: '宿主工具表中当前有 0 个商奕确定性工具可用。请勿在无工具状态下继续商业或金融决策对话。',
+      fixCommands: [
+        'shangyi start',
+        'bash shangyi/ui/scripts/install-workbench.sh --no-open'
+      ]
+    })
+  }
+  if (!kb.ok) {
+    problems.push({
+      code: 'kb_unavailable',
+      severity: 'warning',
+      title: '未能加载商奕本地知识库（shangyi/kb）',
+      detail: kb.error,
+      fixCommands: ['export SHANGYI_ROOT=/path/to/shangyi-repo']
+    })
+  }
+
+  return {
+    ok: Boolean(binary.found && kb.ok && mcpTools.status !== 'missing'),
+    checkedAt: new Date().toISOString(),
+    binary,
+    kb,
+    workspace,
+    mcpTools,
+    problems
   }
 }
 
@@ -787,6 +1383,31 @@ export function apply(ctx) {
       c.logger?.warn?.('dsh-plugin-shangyi: connection.fetch 不可用，卡片路由未注册')
       return
     }
+    const startupHealth = getHealthStatus({ c, ctx })
+    if (!startupHealth.ok) {
+      c.logger?.error?.(
+        `dsh-plugin-shangyi: 确定性内核健康检查未通过 [${startupHealth.problems.map((p) => p.code).join(', ')}] — 请执行 shangyi start 或检查 SHANGYI_BIN`
+      )
+    }
+    c.effect(
+      () => fetchReg.register({
+        path: '/api/shangyi/health',
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: async () => {
+          try {
+            const h = getHealthStatus({ c, ctx })
+            return Response.json(h, { headers: { 'cache-control': 'no-store' } })
+          } catch (e) {
+            return Response.json(
+              { ok: false, error: String(e?.message || e), problems: [{ code: 'health_error', severity: 'blocking', title: '健康检查失败', detail: String(e?.message || e), fixCommands: ['shangyi start'] }] },
+              { status: 500, headers: { 'cache-control': 'no-store' } }
+            )
+          }
+        }
+      }),
+      'dsh-plugin-shangyi: health route'
+    )
     c.effect(
       () => fetchReg.register({
         path: '/api/shangyi/cards',
