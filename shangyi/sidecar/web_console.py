@@ -70,6 +70,8 @@ def find_shangyi_bin() -> str | None:
     if os.environ.get("SHANGYI_BIN"):
         return os.environ["SHANGYI_BIN"]
     candidates = [
+        Path.home() / ".shangyi" / "bin" / "shangyi",
+        Path("/tmp/shangyi-target/release/shangyi"),
         Path.home() / ".shangyi-build" / "shangyi" / "debug" / "shangyi",
         Path.home() / ".shangyi-build" / "shangyi" / "release" / "shangyi",
     ]

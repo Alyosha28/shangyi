@@ -192,13 +192,12 @@ fn tools_list_matches_the_registry_exactly() {
     let tools = r["result"]["tools"].as_array().expect("tools 数组");
     let registry = ToolRegistry::standard();
 
-    // 数目：从源码数一遍（ToolRegistry::standard() 里的 spec 元组）。
-    //
-    // ⚠️ 任务描述写的是「41 条 spec」，而**实测源码是 38**：
-    // `shangyi-tools/src/lib.rs` 的 `let specs: Vec<...> = vec![...]` 段落里有 38 个
-    // 元组，`shangyi-tools/tests/registry.rs::standard_registry_has_all_documented_tools`
-    // 的 expected 列表也是 38 项。故这里的判据是"与注册表一致"，不是照抄 41。
-    assert_eq!(registry.len(), 39, "注册表工具数变了：请同步本断言与文档");
+    // 数目：与 [`shangyi_tools::STANDARD_TOOL_COUNT`] 及 `ToolRegistry::standard()` 严格一致（39 个工具）。
+    assert_eq!(
+        registry.len(),
+        shangyi_tools::STANDARD_TOOL_COUNT,
+        "注册表工具数变了：请同步 STANDARD_TOOL_COUNT、本断言与文档"
+    );
     assert_eq!(
         tools.len(),
         registry.len(),
@@ -1651,4 +1650,887 @@ fn task_scope_and_conditional_followup_survive_resume_cleanly() {
         "select_task_scope",
         json!({"scope": "cost", "reason": "单算房租预算"}),
     )));
+}
+
+fn evidenced_pd_ledger_clauses() -> &'static str {
+    "我方维持同得收益为3元。我方受损收益为0元。我方抢占收益为5元。我方互降收益为1元。\
+     对手维持同得收益为3元。对手抢占收益为5元。对手受损收益为0元。对手互降收益为1元。"
+}
+
+fn evidenced_pd_gamespec() -> Value {
+    json!({
+        "game_id": "mcp-evidenced-pd",
+        "players": [
+            {"id": "us", "name": "我方", "vn_role": "focal", "relation_to_game": "player"},
+            {"id": "rival", "name": "对手", "vn_role": "substitutor", "relation_to_game": "player"}
+        ],
+        "strategies": {"us": ["维持", "降价"], "rival": ["维持", "降价"]},
+        "payoffs": {"form": "normal", "values": {"cells": {
+            "维持,维持": {"us": {"kind": "ref", "value": "u_mm"}, "rival": {"kind": "ref", "value": "r_mm"}},
+            "维持,降价": {"us": {"kind": "ref", "value": "u_md"}, "rival": {"kind": "ref", "value": "r_md"}},
+            "降价,维持": {"us": {"kind": "ref", "value": "u_dm"}, "rival": {"kind": "ref", "value": "r_dm"}},
+            "降价,降价": {"us": {"kind": "ref", "value": "u_dd"}, "rival": {"kind": "ref", "value": "r_dd"}}
+        }}},
+        "params": {
+            "u_mm": {"name": "我方维持收益", "value": {"kind": "literal", "value": 3}, "unit": "元", "source": {"kind": "user_confirmed", "checkpoint": "cp2", "user_quote": "我方维持同得收益为3元"}},
+            "u_md": {"name": "我方受损收益", "value": {"kind": "literal", "value": 0}, "unit": "元", "source": {"kind": "user_confirmed", "checkpoint": "cp2", "user_quote": "我方受损收益为0元"}},
+            "u_dm": {"name": "我方抢占收益", "value": {"kind": "literal", "value": 5}, "unit": "元", "source": {"kind": "user_confirmed", "checkpoint": "cp2", "user_quote": "我方抢占收益为5元"}},
+            "u_dd": {"name": "我方互降收益", "value": {"kind": "literal", "value": 1}, "unit": "元", "source": {"kind": "user_confirmed", "checkpoint": "cp2", "user_quote": "我方互降收益为1元"}},
+            "r_mm": {"name": "对手维持收益", "value": {"kind": "literal", "value": 3}, "unit": "元", "source": {"kind": "user_confirmed", "checkpoint": "cp2", "user_quote": "对手维持同得收益为3元"}},
+            "r_md": {"name": "对手抢占收益", "value": {"kind": "literal", "value": 5}, "unit": "元", "source": {"kind": "user_confirmed", "checkpoint": "cp2", "user_quote": "对手抢占收益为5元"}},
+            "r_dm": {"name": "对手受损收益", "value": {"kind": "literal", "value": 0}, "unit": "元", "source": {"kind": "user_confirmed", "checkpoint": "cp2", "user_quote": "对手受损收益为0元"}},
+            "r_dd": {"name": "对手互降收益", "value": {"kind": "literal", "value": 1}, "unit": "元", "source": {"kind": "user_confirmed", "checkpoint": "cp2", "user_quote": "对手互降收益为1元"}}
+        }
+    })
+}
+
+#[test]
+fn whatif_mode_can_skip_optional_solve_into_consequence_and_survives_resume() {
+    use std::io::Write;
+    let home = temp_home("whatif-skip-solve");
+    let runtime_dir = home.join("runtime");
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    let ledger = runtime_dir.join("trusted_user_inputs.jsonl");
+    std::fs::write(
+        &ledger,
+        format!("{{\"text\":\"{}\",\"user_actor\":\"user\",\"at\":\"2026-11-15T00:00:00Z\"}}\n", evidenced_pd_ledger_clauses()),
+    )
+    .unwrap();
+
+    let h = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Whatif,
+        playbook_id: None,
+        home: Some(home.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: None,
+    })
+    .expect("open whatif host");
+    let mut s = Server::new(Cursor::new(Vec::new()), Vec::new(), h);
+
+    call(
+        &mut s,
+        json!(1),
+        "select_task_scope",
+        json!({"scope": "consultation", "reason": "直接假设我方降价后对手如何反应", "mode": "whatif"}),
+    );
+    call(&mut s, json!(2), "vn_map", json!({}));
+    call(
+        &mut s,
+        json!(3),
+        "participant_profile_update",
+        json!({"participant_id": "us", "value_net_role": "focal", "relation_to_game": "player", "common": {"interests": ["利润"]}}),
+    );
+    call(
+        &mut s,
+        json!(4),
+        "participant_profile_update",
+        json!({"participant_id": "rival", "value_net_role": "substitutor", "relation_to_game": "player", "common": {"interests": ["份额"]}}),
+    );
+    call(
+        &mut s,
+        json!(5),
+        "checkpoint",
+        json!({"items": [{"id": "c1", "content": "确认参与者边界"}]}),
+    );
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f, "{{\"text\":\"同意参与者边界\",\"user_actor\":\"user\",\"at\":\"2026-11-15T00:00:05Z\"}}").unwrap();
+    drop(f);
+    assert!(!is_error(&call(
+        &mut s,
+        json!(6),
+        "checkpoint",
+        json!({"decision": "approve", "user_quote": "同意参与者边界"}),
+    )));
+    assert_eq!(s.host().phase().as_str(), "model_build");
+
+    let build = call(&mut s, json!(7), "gamespec_build", evidenced_pd_gamespec());
+    assert!(!is_error(&build), "gamespec_build 失败：{}", text_of(&build));
+    let cp2_open = call(
+        &mut s,
+        json!(8),
+        "checkpoint",
+        json!({"items": [{"id": "c2", "content": "确认博弈矩阵与假设", "source": "用户明确说明收益", "proposed_value": "3 / 0 / 5 / 1"}]}),
+    );
+    assert!(!is_error(&cp2_open), "打开 cp2 失败：{}", text_of(&cp2_open));
+    let mut f2 = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f2, "{{\"text\":\"确认博弈模型\",\"user_actor\":\"user\",\"at\":\"2026-11-15T00:00:10Z\"}}").unwrap();
+    drop(f2);
+    assert!(!is_error(&call(
+        &mut s,
+        json!(9),
+        "checkpoint",
+        json!({"decision": "approve", "user_quote": "确认博弈模型"}),
+    )));
+    assert_eq!(s.host().phase().as_str(), "solve");
+
+    // 不得借绕过跳过非 consequence 工具（例如在 solve 直接调 report_render 仍须被拒）
+    let wrong = call(&mut s, json!(10), "report_render", json!({}));
+    assert!(is_error(&wrong), "无关阶段工具不得触发 solve 跳过");
+    assert_eq!(s.host().phase().as_str(), "solve");
+
+    // 直接调 consequence_predict：必须自动跳过可选 solve 进入 consequence 执行，并在 cp3 前驻留
+    let conseq = call(&mut s, json!(11), "consequence_predict", json!({"decision": "降价"}));
+    assert!(
+        !is_error(&conseq),
+        "whatif 在 solve 直接调用 consequence_predict 应自动跳过 solve：{}",
+        text_of(&conseq)
+    );
+    assert_eq!(s.host().phase().as_str(), "consequence");
+
+    let case_id = s.host().case_id().to_string();
+    drop(s);
+
+    // --resume 重放 PhaseEntered(solve -> consequence) 必须成功恢复 consequence 与推演产物；
+    // 随后经真实 cp3 确认推进至 recommend 并顺利生成建议。
+    let h_res = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Whatif,
+        playbook_id: None,
+        home: Some(home),
+        auto_approve_checkpoints: false,
+        resume_case: Some(case_id),
+    })
+    .expect("resume whatif host");
+    let mut s_res = Server::new(Cursor::new(Vec::new()), Vec::new(), h_res);
+    assert_eq!(s_res.host().phase().as_str(), "consequence");
+
+    let cp3_open = call(
+        &mut s_res,
+        json!(12),
+        "checkpoint",
+        json!({"items": [{"id": "c3", "content": "确认推演条件与对手最佳反应", "source": "consequence_predict 确定性推演", "proposed_value": "对手降价"}]}),
+    );
+    assert!(!is_error(&cp3_open), "打开 cp3 失败：{}", text_of(&cp3_open));
+    let mut f3 = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f3, "{{\"text\":\"同意推演结果，进入建议阶段\",\"user_actor\":\"user\",\"at\":\"2026-11-15T00:00:15Z\"}}").unwrap();
+    drop(f3);
+    assert!(!is_error(&call(
+        &mut s_res,
+        json!(13),
+        "checkpoint",
+        json!({"decision": "approve", "user_quote": "同意推演结果"}),
+    )));
+    assert_eq!(s_res.host().phase().as_str(), "recommend");
+
+    let rec = call(
+        &mut s_res,
+        json!(14),
+        "recommend_build",
+        json!({"headline": "降价后对手跟进降价", "actions": [{"action": "降价", "rationale": "纳什最佳反应"}]}),
+    );
+    assert!(
+        !is_error(&rec),
+        "whatif --resume 后 recommend_build 必须保留 consequence_report：{}",
+        text_of(&rec)
+    );
+}
+
+#[test]
+fn open_resumed_replays_constraint_check_novel_move_filter_and_in_place_rewind_cleanly() {
+    use std::io::Write;
+    let home = temp_home("replay-m2-tools");
+    let runtime_dir = home.join("runtime");
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    let ledger = runtime_dir.join("trusted_user_inputs.jsonl");
+    std::fs::write(
+        &ledger,
+        format!(
+            "{{\"text\":\"我的月租上限25000元。{}\",\"user_actor\":\"user\",\"at\":\"2026-11-15T00:00:00Z\"}}\n",
+            evidenced_pd_ledger_clauses()
+        ),
+    )
+    .unwrap();
+
+    // Part 1: constraint_check + novel_move_filter 跨 --resume 恢复状态
+    let h = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Whatif,
+        playbook_id: None,
+        home: Some(home.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: None,
+    })
+    .expect("open replay test");
+    let mut s = Server::new(Cursor::new(Vec::new()), Vec::new(), h);
+    call(
+        &mut s,
+        json!(1),
+        "select_task_scope",
+        json!({"scope": "consultation", "reason": "检验约束与新策略重放", "mode": "whatif"}),
+    );
+    let cr = call(&mut s, json!(2), "constraint_register", json!({"quote": "我的月租上限25000元"}));
+    assert!(!is_error(&cr), "constraint_register 失败：{}", text_of(&cr));
+    let cost = call(
+        &mut s,
+        json!(3),
+        "business_cost",
+        json!({
+            "operation": "create",
+            "scenario": "稳妥选址",
+            "currency": "CNY",
+            "commitment_months": 12,
+            "horizon_months": 12,
+            "costs_complete": true,
+            "costs": [{"scenario": "稳妥选址", "name": "租金", "constraint_metric": "rent", "treatment": "cash_expense", "amount": 20000, "period": "month", "basis": "user_provided", "source": "房东报价"}]
+        }),
+    );
+    assert!(!is_error(&cost), "{}", text_of(&cost));
+    call(&mut s, json!(4), "vn_map", json!({}));
+    call(
+        &mut s,
+        json!(5),
+        "participant_profile_update",
+        json!({"participant_id": "us", "value_net_role": "focal", "relation_to_game": "player", "common": {"interests": ["利润"]}}),
+    );
+    call(
+        &mut s,
+        json!(6),
+        "participant_profile_update",
+        json!({"participant_id": "rival", "value_net_role": "substitutor", "relation_to_game": "player", "common": {"interests": ["份额"]}}),
+    );
+    call(&mut s, json!(7), "checkpoint", json!({"items": [{"id": "c1", "content": "确认情报"}]}));
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f, "{{\"text\":\"同意情报\",\"user_actor\":\"user\",\"at\":\"2026-11-15T00:00:05Z\"}}").unwrap();
+    drop(f);
+    assert!(!is_error(&call(&mut s, json!(8), "checkpoint", json!({"decision": "approve", "user_quote": "同意情报"}))));
+    assert_eq!(s.host().phase().as_str(), "model_build");
+
+    let cc = call(&mut s, json!(9), "constraint_check", json!({}));
+    assert!(!is_error(&cc), "{}", text_of(&cc));
+    let cc_v: Value = serde_json::from_str(&payload_of(&cc)).unwrap();
+    let rev = cc_v["constraint_revision"].as_u64().unwrap();
+    let sid = cc_v["eligible_scenario_ids"][0]
+        .as_str()
+        .unwrap_or_else(|| panic!("cc_v 缺少 eligible_scenario_ids：{cc_v}"))
+        .to_string();
+
+    let mut spec = evidenced_pd_gamespec();
+    spec["constraint_revision"] = json!(rev);
+    spec["strategy_bindings"] = json!({"us": {"维持": sid.clone(), "降价": sid}});
+    let build = call(&mut s, json!(10), "gamespec_build", spec);
+    assert!(!is_error(&build), "gamespec_build 失败：{}", text_of(&build));
+
+    let cp2_open = call(&mut s, json!(11), "checkpoint", json!({"items": [{"id": "c2", "content": "确认模型", "source": "用户明确说明收益", "proposed_value": "3 / 0 / 5 / 1"}]}));
+    assert!(!is_error(&cp2_open), "打开 cp2 失败：{}", text_of(&cp2_open));
+    let mut f2 = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(f2, "{{\"text\":\"确认模型\",\"user_actor\":\"user\",\"at\":\"2026-11-15T00:00:10Z\"}}").unwrap();
+    drop(f2);
+    assert!(!is_error(&call(&mut s, json!(12), "checkpoint", json!({"decision": "approve", "user_quote": "确认模型"}))));
+    assert_eq!(s.host().phase().as_str(), "solve");
+
+    // 跳过 solve 后在 consequence 注册非常规动作
+    let nmf = call(
+        &mut s,
+        json!(13),
+        "novel_move_filter",
+        json!({
+            "actor_id": "us",
+            "description": "向大客户披露合规承诺",
+            "payoff_channel": "巩固长期签约留存",
+            "expected_benefit": {"lo": 100.0, "hi": 200.0},
+            "expected_cost": {"lo": 1.0, "hi": 5.0},
+            "legality_basis": ["《反不正当竞争法》第十一条"],
+            "feasibility_basis": ["已有客户渠道"],
+            "introduces_actors": []
+        }),
+    );
+    assert!(!is_error(&nmf), "{}", text_of(&nmf));
+    assert_eq!(s.host().phase().as_str(), "consequence");
+
+    let case_id = s.host().case_id().to_string();
+    drop(s);
+
+    // --resume 后必须能直接推演刚通过 novel_move_filter 注册的新策略，且 constraint_check 审阅态已恢复
+    let h_res = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Whatif,
+        playbook_id: None,
+        home: Some(home.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: Some(case_id),
+    })
+    .expect("resume replay test");
+    let mut s_res = Server::new(Cursor::new(Vec::new()), Vec::new(), h_res);
+    assert_eq!(s_res.host().phase().as_str(), "consequence");
+    let pred_novel = call(
+        &mut s_res,
+        json!(14),
+        "consequence_predict",
+        json!({"decision": "[非常规] 向大客户披露合规承诺"}),
+    );
+    let pred_msg = text_of(&pred_novel);
+    assert!(
+        pred_msg.contains("[非常规] 向大客户披露合规承诺") && pred_msg.contains("支付矩阵缺 2 个策略组合"),
+        "--resume 后 GameSpec 必须保留 novel_move_filter 注册的新策略（不能回退成未声明策略）：{pred_msg}"
+    );
+
+    // Part 2: 在位修订 PhaseRewound { from: "model_build", to: "model_build" } 重放后不得复活 GameSpecValidated
+    let home2 = temp_home("replay-in-place-rewind");
+    let rt2 = home2.join("runtime");
+    std::fs::create_dir_all(&rt2).unwrap();
+    let ledger2 = rt2.join("trusted_user_inputs.jsonl");
+    std::fs::write(
+        &ledger2,
+        format!("{{\"text\":\"{}\",\"user_actor\":\"user\",\"at\":\"2026-11-15T00:00:00Z\"}}\n", evidenced_pd_ledger_clauses()),
+    )
+    .unwrap();
+    let h2 = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home2.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: None,
+    })
+    .unwrap();
+    let mut s2 = Server::new(Cursor::new(Vec::new()), Vec::new(), h2);
+    call(&mut s2, json!(1), "select_task_scope", json!({"scope": "consultation", "reason": "完整分析"}));
+    call(&mut s2, json!(2), "vn_map", json!({}));
+    call(&mut s2, json!(3), "participant_profile_update", json!({"participant_id": "us", "value_net_role": "focal", "relation_to_game": "player", "common": {"interests": ["利润"]}}));
+    call(&mut s2, json!(4), "participant_profile_update", json!({"participant_id": "rival", "value_net_role": "substitutor", "relation_to_game": "player", "common": {"interests": ["份额"]}}));
+    call(&mut s2, json!(5), "checkpoint", json!({"items": [{"id": "c1", "content": "确认情报"}]}));
+    let mut f3 = std::fs::OpenOptions::new().append(true).open(&ledger2).unwrap();
+    writeln!(f3, "{{\"text\":\"同意情报\",\"user_actor\":\"user\",\"at\":\"2026-11-15T00:00:05Z\"}}").unwrap();
+    drop(f3);
+    assert!(!is_error(&call(&mut s2, json!(6), "checkpoint", json!({"decision": "approve", "user_quote": "同意情报"}))));
+    assert!(!is_error(&call(&mut s2, json!(7), "gamespec_build", evidenced_pd_gamespec())));
+    assert!(!is_error(&call(&mut s2, json!(8), "checkpoint", json!({"items": [{"id": "c2", "content": "确认模型", "source": "用户明确说明收益", "proposed_value": "3 / 0 / 5 / 1"}]}))));
+    let case_id2 = s2.host().case_id().to_string();
+    let case_dir2 = s2.host().case_dir().expect("case_dir2").to_path_buf();
+    drop(s2);
+
+    // 模拟在位修订写入 CheckpointAnswered("修改：...") + PhaseRewound(model_build -> model_build)
+    let log_path = case_dir2.join("case.jsonl");
+    let existing = std::fs::read_to_string(&log_path).unwrap();
+    let last_seq = existing
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .last()
+        .and_then(|l| serde_json::from_str::<Value>(l).ok())
+        .and_then(|v| v["seq"].as_u64())
+        .unwrap_or(0);
+    let mut lf = std::fs::OpenOptions::new().append(true).open(&log_path).unwrap();
+    writeln!(
+        lf,
+        "{}",
+        json!({
+            "seq": last_seq + 1,
+            "event": {
+                "type": "checkpoint_answered",
+                "id": "cp2",
+                "answers": ["修改：我方月租金上限改为15000元"],
+                "user_actor": "user",
+                "at": "2026-11-15T00:00:20Z"
+            }
+        })
+    )
+    .unwrap();
+    writeln!(
+        lf,
+        "{}",
+        json!({
+            "seq": last_seq + 2,
+            "event": {
+                "type": "phase_rewound",
+                "from": "model_build",
+                "to": "model_build",
+                "due_to": "用户修订本轮模型",
+                "at": "2026-11-15T00:00:21Z"
+            }
+        })
+    )
+    .unwrap();
+    drop(lf);
+
+    let h2_res = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home2),
+        auto_approve_checkpoints: false,
+        resume_case: Some(case_id2),
+    })
+    .expect("resume in-place rewind");
+    let mut s2_res = Server::new(Cursor::new(Vec::new()), Vec::new(), h2_res);
+    assert_eq!(s2_res.host().phase().as_str(), "model_build");
+    let val = call(&mut s2_res, json!(9), "gamespec_validate", json!({}));
+    assert!(
+        is_error(&val),
+        "在位 PhaseRewound(model_build -> model_build) 重放后不得复活已清除的 GameSpec：{}",
+        text_of(&val)
+    );
+}
+
+// ─────────────────────────── 13. swarm_run / data_ingest 离线 --resume 恢复 ───────────────────────────
+
+fn read_http_request_body(stream: &mut std::net::TcpStream) -> String {
+    use std::io::Read;
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let header_end = loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => return String::new(),
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            }
+            Err(_) => return String::new(),
+        }
+    };
+    let header_str = String::from_utf8_lossy(&buf[..header_end]);
+    let content_length = header_str
+        .lines()
+        .find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            if k.trim().eq_ignore_ascii_case("content-length") {
+                v.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    while buf.len() < header_end + content_length {
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
+    let body_end = (header_end + content_length).min(buf.len());
+    String::from_utf8_lossy(&buf[header_end..body_end]).to_string()
+}
+
+struct MockSwarmHttpServer {
+    base_url: String,
+    hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl MockSwarmHttpServer {
+    fn start() -> Self {
+        use std::io::Write;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock LLM port");
+        let addr = listener.local_addr().expect("local addr");
+        listener.set_nonblocking(true).expect("nonblocking listener");
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let hits_bg = hits.clone();
+        let stop_bg = stop.clone();
+
+        let handle = std::thread::spawn(move || {
+            while !stop_bg.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        hits_bg.fetch_add(1, Ordering::SeqCst);
+                        let body = read_http_request_body(&mut stream);
+                        let content = if body.contains("你（us）") {
+                            json!({
+                                "kind": "novel",
+                                "description": "向大客户披露合规承诺",
+                                "rationale": "巩固大客户留存",
+                                "introduces": [],
+                                "legality_basis": ["《反不正当竞争法》第十一条"],
+                                "feasibility_basis": ["已有客户渠道"],
+                                "expected_benefit": [100, 200],
+                                "expected_cost": [1, 5]
+                            })
+                            .to_string()
+                        } else {
+                            json!({
+                                "kind": "in_matrix",
+                                "strategy": "维持",
+                                "rationale": "暂维持原价观望"
+                            })
+                            .to_string()
+                        };
+                        let resp_json = json!({
+                            "id": "chatcmpl-mock",
+                            "object": "chat.completion",
+                            "model": "test-model",
+                            "choices": [{
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": content
+                                },
+                                "finish_reason": "stop"
+                            }]
+                        })
+                        .to_string();
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            resp_json.len(),
+                            resp_json
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                        let _ = stream.flush();
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            base_url: format!("http://{addr}/v1"),
+            hits,
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for MockSwarmHttpServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+#[test]
+fn resume_swarm_run_makes_zero_llm_http_calls_and_restores_state() {
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+
+    let mock = MockSwarmHttpServer::start();
+    let home = temp_home("resume-swarm-offline");
+    let runtime_dir = home.join("runtime");
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    let ledger = runtime_dir.join("trusted_user_inputs.jsonl");
+    std::fs::write(
+        &ledger,
+        format!(
+            "{{\"text\":\"{}\",\"user_actor\":\"user\",\"at\":\"2026-11-15T00:00:00Z\"}}\n",
+            evidenced_pd_ledger_clauses()
+        ),
+    )
+    .unwrap();
+
+    let h = SessionHost::open_with_swarm_override(
+        HostConfig {
+            mode: ConsultationMode::Whatif,
+            playbook_id: None,
+            home: Some(home.clone()),
+            auto_approve_checkpoints: false,
+            resume_case: None,
+        },
+        Some(shangyi_core::domain_exec::openai_swarm_actor_factory_for_test(
+            &mock.base_url,
+            "test-model",
+        )),
+    )
+    .expect("open initial host");
+    let mut s = Server::new(Cursor::new(Vec::new()), Vec::new(), h);
+
+    call(
+        &mut s,
+        json!(1),
+        "select_task_scope",
+        json!({"scope": "consultation", "reason": "检验 swarm_run 离线重放", "mode": "whatif"}),
+    );
+    call(&mut s, json!(2), "vn_map", json!({}));
+    call(
+        &mut s,
+        json!(3),
+        "participant_profile_update",
+        json!({"participant_id": "us", "value_net_role": "focal", "relation_to_game": "player", "common": {"interests": ["利润"]}}),
+    );
+    call(
+        &mut s,
+        json!(4),
+        "participant_profile_update",
+        json!({"participant_id": "rival", "value_net_role": "substitutor", "relation_to_game": "player", "common": {"interests": ["份额"]}}),
+    );
+    call(
+        &mut s,
+        json!(5),
+        "checkpoint",
+        json!({"items": [{"id": "c1", "content": "确认参与者"}]}),
+    );
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(
+        f,
+        "{{\"text\":\"同意参与者\",\"user_actor\":\"user\",\"at\":\"2026-11-15T00:00:05Z\"}}"
+    )
+    .unwrap();
+    drop(f);
+    assert!(!is_error(&call(
+        &mut s,
+        json!(6),
+        "checkpoint",
+        json!({"decision": "approve", "user_quote": "同意参与者"}),
+    )));
+    assert!(!is_error(&call(
+        &mut s,
+        json!(7),
+        "gamespec_build",
+        evidenced_pd_gamespec(),
+    )));
+    assert!(!is_error(&call(
+        &mut s,
+        json!(8),
+        "checkpoint",
+        json!({"items": [{"id": "c2", "content": "确认模型", "source": "用户明确说明收益", "proposed_value": "3 / 0 / 5 / 1"}]}),
+    )));
+    let mut f2 = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
+    writeln!(
+        f2,
+        "{{\"text\":\"确认模型\",\"user_actor\":\"user\",\"at\":\"2026-11-15T00:00:10Z\"}}"
+    )
+    .unwrap();
+    drop(f2);
+    assert!(!is_error(&call(
+        &mut s,
+        json!(9),
+        "checkpoint",
+        json!({"decision": "approve", "user_quote": "确认模型"}),
+    )));
+    assert_eq!(s.host().phase().as_str(), "solve");
+
+    // 首次在真实（mock HTTP）LLM 工厂下运行 swarm_run，应命中 mock HTTP 并注册非常规策略
+    let sw = call(&mut s, json!(10), "swarm_run", json!({"rollouts": 1}));
+    assert!(!is_error(&sw), "初始 swarm_run 应成功：{}", text_of(&sw));
+    assert!(mock.hits.load(Ordering::SeqCst) > 0, "首次 swarm_run 应调用 mock LLM HTTP");
+    assert_eq!(s.host().phase().as_str(), "consequence");
+    assert!(s.host().domain_state().swarm_output.is_some());
+    assert!(
+        s.host()
+            .domain_state()
+            .game_spec
+            .as_ref()
+            .unwrap()
+            .strategies["us"]
+            .contains(&"[非常规] 向大客户披露合规承诺".to_string())
+    );
+
+    let case_id = s.host().case_id().to_string();
+    drop(s);
+
+    // 清零计数器并执行 --resume（仍传入活跃的 mock HTTP SwarmActorFactory）
+    mock.hits.store(0, Ordering::SeqCst);
+    let resumed_host = SessionHost::open_with_swarm_override(
+        HostConfig {
+            mode: ConsultationMode::Whatif,
+            playbook_id: None,
+            home: Some(home.clone()),
+            auto_approve_checkpoints: false,
+            resume_case: Some(case_id),
+        },
+        Some(shangyi_core::domain_exec::openai_swarm_actor_factory_for_test(
+            &mock.base_url,
+            "test-model",
+        )),
+    )
+    .expect("resume with swarm override");
+
+    assert_eq!(
+        mock.hits.load(Ordering::SeqCst),
+        0,
+        "--resume 重放历史 swarm_run 绝不得发起任何 LLM HTTP 请求"
+    );
+    assert_eq!(resumed_host.phase().as_str(), "consequence");
+    let restored_swarm = resumed_host
+        .domain_state()
+        .swarm_output
+        .as_ref()
+        .expect("--resume 应从日志恢复 swarm_output");
+    assert_eq!(
+        restored_swarm["counts"]["novel_moves_registered"],
+        json!(1)
+    );
+    assert!(
+        resumed_host
+            .domain_state()
+            .game_spec
+            .as_ref()
+            .unwrap()
+            .strategies["us"]
+            .contains(&"[非常规] 向大客户披露合规承诺".to_string()),
+        "--resume 应将已接受的非常规策略恢复进 GameSpec"
+    );
+
+    // 下游 consequence_predict 应能识别恢复出的 [非常规] 策略，且仍保持 0 次 LLM HTTP 请求
+    let mut s_res = Server::new(Cursor::new(Vec::new()), Vec::new(), resumed_host);
+    let pred_novel = call(
+        &mut s_res,
+        json!(11),
+        "consequence_predict",
+        json!({"decision": "[非常规] 向大客户披露合规承诺"}),
+    );
+    let pred_msg = text_of(&pred_novel);
+    assert!(
+        pred_msg.contains("[非常规] 向大客户披露合规承诺") && pred_msg.contains("支付矩阵缺 2 个策略组合"),
+        "--resume 后 GameSpec 必须保留 swarm_run 注册的非常规策略：{pred_msg}"
+    );
+    assert_eq!(mock.hits.load(Ordering::SeqCst), 0);
+
+    // --resume 后新发起的 swarm_run 仍可正常走已装配的 LLM factory
+    let live_post_resume = call(&mut s_res, json!(12), "swarm_run", json!({"rollouts": 1}));
+    assert!(
+        !is_error(&live_post_resume),
+        "--resume 后新调用 swarm_run 应继续可用：{}",
+        text_of(&live_post_resume)
+    );
+    assert!(
+        mock.hits.load(Ordering::SeqCst) > 0,
+        "--resume 后新调用 swarm_run 应正常访问装配的 LLM factory"
+    );
+    drop(s_res);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn resume_data_ingest_restores_ingested_report_without_sidecar_or_csv() {
+    use std::io::Write;
+    use shangyi_intel::sidecar::{
+        ColumnHint, ComputationBoundary, EncodingDetail, FileInfo, HeaderInfo, IngestReport,
+    };
+
+    let home = temp_home("resume-data-ingest");
+    let h = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: None,
+    })
+    .expect("open initial host");
+    let mut s = Server::new(Cursor::new(Vec::new()), Vec::new(), h);
+    call(
+        &mut s,
+        json!(1),
+        "select_task_scope",
+        json!({"scope": "consultation", "reason": "检验 data_ingest 离线重放"}),
+    );
+    call(&mut s, json!(2), "vn_map", json!({}));
+    assert_eq!(s.host().phase().as_str(), "intel");
+
+    let case_id = s.host().case_id().to_string();
+    let case_dir = s.host().case_dir().expect("case_dir").to_path_buf();
+    drop(s);
+
+    // 构造指向磁盘不存在 CSV 路径的历史 data_ingest 日志记录（模拟原 CSV 已删或无侧车环境）
+    let missing_csv = "/nonexistent/deleted-after-ingest/sales.csv";
+    let report = IngestReport {
+        file: FileInfo {
+            path: missing_csv.to_string(),
+            size_bytes: 256,
+            mtime_ms: 1_700_000_000_000,
+            sha256: Some("deadbeef".to_string()),
+            digest_note: None,
+        },
+        encoding: "utf-8".to_string(),
+        encoding_detail: EncodingDetail {
+            method: "utf8_strict".to_string(),
+            candidates_tried: vec!["utf-8".to_string()],
+            pinned: false,
+            note: String::new(),
+        },
+        delimiter: ",".to_string(),
+        delimiter_source: "sniffer".to_string(),
+        columns: vec!["日期".to_string(), "单价".to_string(), "销量".to_string()],
+        columns_raw: vec!["日期".to_string(), "单价".to_string(), "销量".to_string()],
+        header: HeaderInfo {
+            has_header: true,
+            confidence: "high".to_string(),
+            evidence: "首行全为文本表头".to_string(),
+            first_row_raw: vec!["日期".to_string(), "单价".to_string(), "销量".to_string()],
+        },
+        row_count: 42,
+        row_count_exact: true,
+        scanned_rows: 42,
+        scan_limit: 100_000,
+        sample_rows: Vec::new(),
+        sample_rows_truncated: false,
+        column_hints: vec![ColumnHint {
+            column: "单价".to_string(),
+            hint: "number".to_string(),
+            evidence: "抽样全部可解析为数值".to_string(),
+            non_empty: 42,
+            empty: 0,
+            examples: vec!["18.0".to_string()],
+            alternatives: Vec::new(),
+        }],
+        column_count: 3,
+        ragged_rows: 0,
+        blank_lines: 0,
+        notes: Vec::new(),
+        computation_boundary: ComputationBoundary::default(),
+    };
+    let report_json = serde_json::to_string_pretty(&report).expect("serialize IngestReport");
+
+    let log_path = case_dir.join("case.jsonl");
+    let existing = std::fs::read_to_string(&log_path).unwrap();
+    let last_seq = existing
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .last()
+        .and_then(|l| serde_json::from_str::<Value>(l).ok())
+        .and_then(|v| v["seq"].as_u64())
+        .unwrap_or(0);
+    let mut lf = std::fs::OpenOptions::new().append(true).open(&log_path).unwrap();
+    writeln!(
+        lf,
+        "{}",
+        json!({
+            "seq": last_seq + 1,
+            "event": {
+                "type": "tool_call_started",
+                "step": {"turn": 1, "step": 3},
+                "call_id": "mcp-0003",
+                "name": "data_ingest",
+                "arguments": json!({"path": missing_csv}).to_string(),
+                "at": "2026-11-15T00:00:05Z"
+            }
+        })
+    )
+    .unwrap();
+    writeln!(
+        lf,
+        "{}",
+        json!({
+            "seq": last_seq + 2,
+            "event": {
+                "type": "tool_call_finished",
+                "call_id": "mcp-0003",
+                "outcome": {
+                    "status": "ok",
+                    "output": report_json
+                },
+                "at": "2026-11-15T00:00:06Z"
+            }
+        })
+    )
+    .unwrap();
+    drop(lf);
+
+    let resumed_host = SessionHost::open(HostConfig {
+        mode: ConsultationMode::Scenario,
+        playbook_id: None,
+        home: Some(home.clone()),
+        auto_approve_checkpoints: false,
+        resume_case: Some(case_id),
+    })
+    .expect("resume with data_ingest snapshot");
+
+    assert_eq!(resumed_host.phase().as_str(), "intel");
+    let ingested = &resumed_host.domain_state().ingested;
+    assert_eq!(
+        ingested.len(),
+        1,
+        "--resume 应离线恢复 data_ingest 报告而不依赖原 CSV 或 Python 侧车"
+    );
+    assert_eq!(ingested[0].file.path, missing_csv);
+    assert_eq!(ingested[0].columns, vec!["日期", "单价", "销量"]);
+    assert_eq!(ingested[0].row_count, 42);
+    assert!(ingested[0].row_count_exact);
+    drop(resumed_host);
+    let _ = std::fs::remove_dir_all(&home);
 }

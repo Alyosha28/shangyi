@@ -185,7 +185,11 @@ fn real_binary_handshake_lists_tools_and_serves_a_call() {
     let tools = listed["result"]["tools"].as_array().expect("tools 数组");
     let registry = shangyi_tools::ToolRegistry::standard();
     assert_eq!(tools.len(), registry.len(), "tools/list 数量必须等于注册表");
-    assert_eq!(registry.len(), 39, "注册表工具数变了：同步本断言");
+    assert_eq!(
+        registry.len(),
+        shangyi_tools::STANDARD_TOOL_COUNT,
+        "注册表工具数变了：同步本断言"
+    );
     let listed_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     let expected: Vec<&str> = registry.names().into_iter().collect();
     assert_eq!(listed_names, expected);

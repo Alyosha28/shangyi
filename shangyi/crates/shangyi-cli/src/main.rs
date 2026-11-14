@@ -49,7 +49,7 @@ fn main() -> ExitCode {
     // 注：剧本加载需读文件系统；此处以 None 表示"由后续推荐流程决定"。
     // 真正的剧本解析在 `shangyi-playbooks`，此处不重复实现 I/O。
     if let Err(e) = self_check(&cmd, &registry, None) {
-        eprintln!("商奕：启动检查没过：{e}");
+        eprintln!("商奕：{e}");
         return ExitCode::from(3);
     }
 
@@ -107,15 +107,17 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Report { case, format } => {
-            match shangyi_cli::report_cmd::run_report(case, *format) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("商奕：{e}");
-                    ExitCode::FAILURE
-                }
+        Command::Report {
+            case,
+            format,
+            output,
+        } => match shangyi_cli::report_cmd::run_report(case, *format, output.as_deref()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("商奕：{e}");
+                ExitCode::FAILURE
             }
-        }
+        },
         Command::Backtest { scenario } => {
             // `--scenario` 目前只用于**筛选展示**，不改变数据来源。
             // 如实说明这一点，而不是让它看起来"按场景过滤了"。

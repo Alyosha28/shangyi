@@ -8,7 +8,7 @@
 
 1. **LLM 绝不算数**：大语言模型负责自然语言理解、信息收集编排、形式化建模提案（`GameSpec` / 成本明细）与结果解释；所有向用户报告的数值（纳什均衡、量化反应均衡、防悔下界、敏感度翻转点、期间累计现金流、盈亏平衡点等）均必须来自 `TrustLevel::Engine` 的 Rust 确定性工具输出。
 2. **未经确认的假设不得静默进入求解器**：收益矩阵与先验分布必须附带来源标签（`user_confirmed`、`public_data`、`prior_borrowed`、`llm_inferred`），存在缺口或硬假设时须经检查点（`cp1` / `cp2` / `cp3`）由真实用户确认（`user_actor = "user"`）后方可推进。
-3. **进程级 MCP 确定性边界**：Rust Workspace（15 个 crate）通过 `shangyi mcp-serve`（JSON-RPC 2.0 over stdio）向 DSH 暴露 38 个领域工具与 MCP Resources（35 篇知识库 + 4 套行业剧本），数值状态机与 `case.jsonl` 追加日志全部保留在纯 Rust 进程内。
+3. **进程级 MCP 确定性边界**：Rust Workspace（15 个 crate）通过 `shangyi mcp-serve`（JSON-RPC 2.0 over stdio）向 DSH 暴露 39 个领域工具与 MCP Resources（35 篇知识库 + 4 套行业剧本），数值状态机与 `case.jsonl` 追加日志全部保留在纯 Rust 进程内。
 
 ---
 
@@ -45,28 +45,41 @@
 - Python `>= 3.11`（用于门禁脚本与 sidecar）
 - 可选：`dsh`（`@deepseek-ai/dsh`，用于运行 DeepSeek Harness 宿主与 Web 工作台）
 
-### 2. 编译与单入口启动（推荐）
+### 2. 编译、运行模式与单入口启动
+
+商奕提供两种互补运行模式：
+- **DSH 完整 Web 工作台 / DSH 无头对话模式**（推荐完整交互）：`shangyi start`（别名 `shangyi ui`，默认端口 `8791`）需本机 `PATH` 已安装 `@deepseek-ai/dsh`（`dsh`）；
+- **纯 Rust 独立 CLI 与轻量 Sidecar**：`shangyi new / resume / solve / report / backtest / kb / checkpoint / mcp-serve` 不依赖 `dsh`；另随附零构建 Python Sidecar Web 控制台 [`shangyi/sidecar/web_console.py`](shangyi/sidecar/web/README.md)。
 
 ```bash
-# 编译并安装发布版商奕 CLI 到 ~/.shangyi/bin（不污染工作目录）
+# 1) 编译并安装发布版商奕 CLI 到 ~/.shangyi/bin（不污染工作目录），再加入 PATH
 tools/loop/build.sh build --release -p shangyi-cli
 mkdir -p ~/.shangyi/bin && cp /tmp/shangyi-target/release/shangyi ~/.shangyi/bin/shangyi
+export PATH="$HOME/.shangyi/bin:$PATH"
 
-# 一条命令初始化 ~/.shangyi/{cases,runtime,kb}、安装/启动 DSH Web 工作台并打开浏览器
-~/.shangyi/bin/shangyi start
+# 2) 按需配置模型与检索/周边 API 凭据（或写入 ~/.shangyi-secrets/*.env）
+export MAGPIE_GATEWAY_KEY=...   # 或 DEEPSEEK_API_KEY=...
+export BOCHA_API_KEY=...        # 可选：公开网页搜索
+export AMAP_KEY=...             # 可选：poi_survey 周边门店计数
+
+# 3) 一条命令初始化 ~/.shangyi/{cases,runtime,kb}、安装/启动 DSH Web 工作台（默认端口 8791）并打开浏览器
+shangyi start
 
 # 如仅需无浏览器模式或指定端口：
-~/.shangyi/bin/shangyi start --no-open --port 8791
+shangyi start --no-open --port 8791
 ```
 
 若尚未把工作台插件挂入 DSH，请先执行一次 `bash shangyi/ui/scripts/install-workbench.sh --install-only`（或在 `install-workbench.sh` 后直接用 `shangyi start` 统一拉起）。工作台顶部与对话侧同时接有 `/api/shangyi/health` 健康探测：若缺少 `shangyi` 二进制或 MCP 工具未连接，界面会**强阻断告警并给出修复命令**，绝不会静默退化成纯大模型对话。
 
-### 3. 常用 CLI 子命令（`report` / `kb` / `mcp-serve`）
+### 3. 常用 CLI 子命令（`start` / `new` / `resume` / `solve` / `report` / `backtest` / `kb` / `checkpoint` / `mcp-serve`）
 
 ```bash
-# 导出确定性 Markdown 决策报告（校验 provenance、隔离 sandbox_exec，拒绝空案例或纯沙箱案例）
-shangyi report latest --format md
-shangyi report <case_id> --format md > report.md
+# 导出确定性决策报告（校验 provenance、隔离 sandbox_exec，拒绝空案例或纯沙箱案例）
+# 默认即为 md（直接输出到 stdout）；支持 --output/-o 指定路径，pdf/docx 按需调用本机 pandoc
+shangyi report latest
+shangyi report <case_id> -o report.md
+shangyi report latest --format docx -o report.docx
+shangyi report latest --format pdf -o report.pdf   # PDF 需本机 pandoc + xelatex 等排版引擎
 
 # 检索、阅读、列出与追加自定义经验知识条目（合并内置 35 篇 + ~/.shangyi/kb）
 shangyi kb list
@@ -74,11 +87,13 @@ shangyi kb search "均衡"
 shangyi kb show equilibrium-selection
 shangyi kb add ./my-experience.md
 
-# 启动 stdio MCP 服务端（供 DSH 宿主挂载）
+# 独立无 dsh 咨询与关口确认 / 离线求解 / stdio MCP 服务
+shangyi new --mode scenario
+shangyi checkpoint latest --approve
 shangyi mcp-serve
 ```
 
-更多 DSH Profile 配置与无头模式用法见 [`dsh/README.md`](dsh/README.md)；引擎与序列化约束见 [`shangyi/README.md`](shangyi/README.md)；系统总体架构见 [`docs/商奕-系统设计文档-v0.3.md`](docs/商奕-系统设计文档-v0.3.md)。
+更多 DSH Profile 配置与无头模式用法见 [`dsh/README.md`](dsh/README.md)；独立 Python Sidecar 控制台说明见 [`shangyi/sidecar/web/README.md`](shangyi/sidecar/web/README.md)；引擎与序列化约束见 [`shangyi/README.md`](shangyi/README.md)；系统总体架构见 [`docs/商奕-系统设计文档-v0.3.md`](docs/商奕-系统设计文档-v0.3.md)；M2 遗留审计与架构收敛评估见 [`docs/M2-遗留审计与架构收敛评估.md`](docs/M2-遗留审计与架构收敛评估.md)。
 
 ---
 
@@ -88,6 +103,7 @@ shangyi mcp-serve
 # 静态护栏
 python3 tools/loop/check-no-harness.py
 python3 tools/loop/check-features.py
+python3 tools/loop/check-docs-sync.py
 python3 tools/kb-lint.py shangyi/kb
 
 # Rust 全量测试

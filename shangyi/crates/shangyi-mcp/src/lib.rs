@@ -11,7 +11,7 @@
 //!   dsh（TS，MIT）                          shangyi（Rust，本 workspace）
 //!   ┌────────────────────┐   MCP stdio    ┌──────────────────────────────┐
 //!   │ agent loop         │◀──────────────▶│ mcp-serve                    │
-//!   │ system prompt      │  JSON-RPC 2.0  │  ├ ToolRegistry（38 个工具） │
+//!   │ system prompt      │  JSON-RPC 2.0  │  ├ ToolRegistry（39 个工具） │
 //!   │ 会话事件 / 审批    │  换行分隔      │  ├ DomainExecutor（执行 seam）│
 //!   └────────────────────┘                │  ├ PhaseMachine（产物闸门）   │
 //!                                         │  └ CaseLog（留档）            │

@@ -7,7 +7,10 @@
 //! - 若存在 `report_render` 产物，必须通过 [`shangyi_report::Report::check_provenance`] 自检。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 use shangyi_core::case_log::{CaseHeader, Recorded};
@@ -16,6 +19,38 @@ use shangyi_report::Report;
 
 use crate::ReportFormat;
 use crate::run::{RunFailure, find_case_dir_in, shangyi_home};
+
+const PDF_ENGINES: &[&str] = &[
+    "xelatex",
+    "lualatex",
+    "tectonic",
+    "typst",
+    "weasyprint",
+    "wkhtmltopdf",
+    "pdflatex",
+];
+
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+struct TempCleanup(Option<PathBuf>);
+
+impl TempCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        if let Some(ref p) = self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
 
 #[derive(Debug)]
 struct CaseSource {
@@ -69,7 +104,11 @@ struct ExtractedReportState {
     bad_lines: usize,
 }
 
-pub fn run_report(case_ref: &str, format: ReportFormat) -> Result<(), RunFailure> {
+pub fn run_report(
+    case_ref: &str,
+    format: ReportFormat,
+    output: Option<&str>,
+) -> Result<(), RunFailure> {
     let source = resolve_case_source(case_ref)?;
     let state = extract_case_state(&source)?;
 
@@ -97,20 +136,292 @@ pub fn run_report(case_ref: &str, format: ReportFormat) -> Result<(), RunFailure
         )));
     }
 
+    let md = format_markdown_report(&source, &state);
     match format {
-        ReportFormat::Md => {
-            let md = format_markdown_report(&source, &state);
-            print!("{md}");
-            Ok(())
+        ReportFormat::Md => match output.map(str::trim) {
+            None | Some("-") => {
+                print!("{md}");
+                Ok(())
+            }
+            Some("") => Err(RunFailure::Session("输出路径不能为空".into())),
+            Some(path_str) => {
+                let out_path = PathBuf::from(path_str);
+                if out_path.is_dir() {
+                    return Err(RunFailure::Io(format!(
+                        "输出路径 `{}` 是目录，请指定具体文件路径",
+                        out_path.display()
+                    )));
+                }
+                write_atomic_bytes(&out_path, "md", md.as_bytes())?;
+                eprintln!("已导出 Markdown 报告：{}", out_path.display());
+                Ok(())
+            }
+        },
+        ReportFormat::Pdf | ReportFormat::Docx => {
+            if output.map(str::trim) == Some("-") {
+                return Err(RunFailure::Session(format!(
+                    "拒绝向标准输出写入二进制 {} 文件；请指定 `--output <文件路径>`，或省略 `--output` 默认保存到 `./{}.{}`。",
+                    format.as_str(),
+                    sanitize_filename(&source.case_id),
+                    format.as_str()
+                )));
+            }
+            let out_path = match output.map(str::trim) {
+                Some("") => return Err(RunFailure::Session("输出路径不能为空".into())),
+                Some(p) => PathBuf::from(p),
+                None => PathBuf::from(format!(
+                    "{}.{}",
+                    sanitize_filename(&source.case_id),
+                    format.as_str()
+                )),
+            };
+            export_via_pandoc(case_ref, &source.case_id, format, &out_path, &md)
         }
-        ReportFormat::Pdf | ReportFormat::Docx => Err(RunFailure::Session(format!(
-            "CLI 原生仅支持 Markdown 输出，未内置 {} 二进制排版器（商奕拒绝写入伪造后缀文件）。\n\
-             请改用：\n  shangyi report {case_ref} --format md > report.md\n\
-             或在 Web 工作台（`shangyi start`）中打开案例「{}」，点击「导出 Markdown / 打印 PDF」。",
-            format.as_str(),
-            source.case_id
-        ))),
     }
+}
+
+fn sanitize_filename(raw: &str) -> String {
+    let mut cleaned: String = raw
+        .trim()
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':' | '\0') || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    while cleaned.contains("..") {
+        cleaned = cleaned.replace("..", "__");
+    }
+    if cleaned.trim_matches(['_', '.']).is_empty() {
+        "shangyi-report".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn probe_program(bin_name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let cand = dir.join(bin_name);
+        if is_executable_file(&cand) {
+            return Some(cand);
+        }
+        #[cfg(windows)]
+        {
+            let exe = dir.join(format!("{bin_name}.exe"));
+            if is_executable_file(&exe) {
+                return Some(exe);
+            }
+        }
+    }
+    None
+}
+
+fn sibling_temp_path(out_path: &Path, ext: &str) -> PathBuf {
+    let parent = out_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let stem = out_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(sanitize_filename)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "shangyi-report".to_string());
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!(".{stem}.shangyi-tmp-{}-{seq}.{ext}", std::process::id()))
+}
+
+fn ensure_parent_dir(out_path: &Path) -> Result<(), RunFailure> {
+    if let Some(parent) = out_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            RunFailure::Io(format!("无法创建输出目录 `{}`：{e}", parent.display()))
+        })?;
+    }
+    Ok(())
+}
+
+fn write_atomic_bytes(out_path: &Path, ext: &str, bytes: &[u8]) -> Result<(), RunFailure> {
+    ensure_parent_dir(out_path)?;
+    let tmp_path = sibling_temp_path(out_path, ext);
+    let mut guard = TempCleanup::new(tmp_path.clone());
+    {
+        let mut f = std::fs::File::create(&tmp_path).map_err(|e| {
+            RunFailure::Io(format!("创建临时文件 `{}` 失败：{e}", tmp_path.display()))
+        })?;
+        f.write_all(bytes).map_err(|e| {
+            RunFailure::Io(format!("写入临时文件 `{}` 失败：{e}", tmp_path.display()))
+        })?;
+        f.flush().map_err(|e| {
+            RunFailure::Io(format!("刷新临时文件 `{}` 失败：{e}", tmp_path.display()))
+        })?;
+    }
+    std::fs::rename(&tmp_path, out_path).map_err(|e| {
+        RunFailure::Io(format!("写入目标文件 `{}` 失败：{e}", out_path.display()))
+    })?;
+    guard.disarm();
+    Ok(())
+}
+
+fn export_via_pandoc(
+    case_ref: &str,
+    case_id: &str,
+    format: ReportFormat,
+    out_path: &Path,
+    md: &str,
+) -> Result<(), RunFailure> {
+    if out_path.is_dir() {
+        return Err(RunFailure::Io(format!(
+            "输出路径 `{}` 是目录，请指定具体文件路径",
+            out_path.display()
+        )));
+    }
+
+    let Some(pandoc_path) = probe_program("pandoc") else {
+        return Err(RunFailure::Session(format!(
+            "未在 PATH 中找到 `pandoc`，无法导出 {} 文件（商奕拒绝写入伪造后缀或空文件）。\n\
+             安装方法（macOS 示例）：`brew install pandoc`\n\
+             或改用以下方式：\n\
+             1. `shangyi report {case_ref} --format md > report.md`（或 `--output report.md`）\n\
+             2. 运行 `shangyi start`，在 Web 工作台打开案例「{case_id}」，点击「导出 Markdown / 打印 PDF」。",
+            format.as_str()
+        )));
+    };
+
+    let pdf_engine = if format == ReportFormat::Pdf {
+        let Some(engine) = PDF_ENGINES
+            .iter()
+            .copied()
+            .find(|eng| probe_program(eng).is_some())
+        else {
+            return Err(RunFailure::Session(format!(
+                "已找到 `pandoc`（{}），但 PATH 中未检测到可用的 PDF 排版引擎（已依次探测：{}），无法生成 PDF（商奕拒绝写入伪造后缀或空文件）。\n\
+                 中文 Markdown 推荐安装 `xelatex`（BasicTeX / TeX Live）、`typst` 或 `weasyprint`。\n\
+                 或立即改用：\n\
+                 1. `shangyi report {case_ref} --format md > report.md`\n\
+                 2. `shangyi report {case_ref} --format docx --output {}.docx`\n\
+                 3. 运行 `shangyi start`，在 Web 工作台打开案例「{case_id}」，点击「导出 Markdown / 打印 PDF」。",
+                pandoc_path.display(),
+                PDF_ENGINES.join(" / "),
+                sanitize_filename(case_id)
+            )));
+        };
+        Some(engine)
+    } else {
+        None
+    };
+
+    ensure_parent_dir(out_path)?;
+    let tmp_path = sibling_temp_path(out_path, format.as_str());
+    let mut tmp_guard = TempCleanup::new(tmp_path.clone());
+
+    let mut cmd = Command::new(&pandoc_path);
+    cmd.arg("--from=markdown+pipe_tables+strikeout")
+        .arg("--standalone")
+        .arg("-t")
+        .arg(format.as_str())
+        .arg("-o")
+        .arg(&tmp_path);
+    if let Some(engine) = pdf_engine {
+        cmd.arg(format!("--pdf-engine={engine}"));
+        if matches!(engine, "xelatex" | "lualatex" | "tectonic") {
+            if let Ok(font) = std::env::var("SHANGYI_PDF_FONT") {
+                let font = font.trim();
+                if !font.is_empty() {
+                    cmd.arg("-V").arg(format!("CJKmainfont={font}"));
+                    cmd.arg("-V").arg(format!("mainfont={font}"));
+                }
+            }
+        }
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        RunFailure::Io(format!("启动 `pandoc`（{}）失败：{e}", pandoc_path.display()))
+    })?;
+    let write_res = if let Some(mut stdin) = child.stdin.take() {
+        let r = stdin.write_all(md.as_bytes());
+        drop(stdin);
+        r
+    } else {
+        Ok(())
+    };
+    let output = child
+        .wait_with_output()
+        .map_err(|e| RunFailure::Io(format!("等待 `pandoc` 完成失败：{e}")))?;
+
+    if !output.status.success() {
+        let stderr_raw = String::from_utf8_lossy(&output.stderr);
+        let stderr_summary: String = stderr_raw.trim().chars().take(600).collect();
+        let stderr_block = if stderr_summary.is_empty() {
+            "（pandoc 未输出 stderr 详情）".to_string()
+        } else {
+            stderr_summary
+        };
+        let font_hint = if format == ReportFormat::Pdf {
+            "\n若因中文字体缺失导致排版失败，可设置 `SHANGYI_PDF_FONT=<字体名>`（如 `PingFang SC` / `Noto Serif CJK SC`）后重试。"
+        } else {
+            ""
+        };
+        return Err(RunFailure::Session(format!(
+            "`pandoc` 转换 {} 失败（退出码 {:?}）：{stderr_block}{font_hint}\n\
+             或改用：\n\
+             1. `shangyi report {case_ref} --format md > report.md`\n\
+             2. 运行 `shangyi start`，在 Web 工作台打开案例「{case_id}」，点击「导出 Markdown / 打印 PDF」。",
+            format.as_str(),
+            output.status.code()
+        )));
+    }
+
+    if let Err(e) = write_res {
+        return Err(RunFailure::Io(format!("向 `pandoc` 写入 Markdown 失败：{e}")));
+    }
+
+    let tmp_len = std::fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
+    if tmp_len == 0 {
+        return Err(RunFailure::Session(format!(
+            "`pandoc` 返回成功但未生成非空 {} 文件（已拒绝落盘）。\n\
+             请改用 `shangyi report {case_ref} --format md > report.md`，或在 Web 工作台（`shangyi start`）导出。",
+            format.as_str()
+        )));
+    }
+
+    std::fs::rename(&tmp_path, out_path).map_err(|e| {
+        RunFailure::Io(format!(
+            "写入目标 {} 文件 `{}` 失败：{e}",
+            format.as_str(),
+            out_path.display()
+        ))
+    })?;
+    tmp_guard.disarm();
+    println!("已生成 {} 报告：{}", format.as_str(), out_path.display());
+    Ok(())
 }
 
 fn has_authoritative_artifacts(s: &ExtractedReportState) -> bool {
@@ -231,35 +542,141 @@ fn unwrap_json_str(raw: &str) -> Value {
     v
 }
 
-fn clear_for_rewind(state: &mut ExtractedReportState, to: &str) {
+fn json_deep_merge(mut base: Value, patch: Value) -> Value {
+    match (&mut base, patch) {
+        (Value::Object(b), Value::Object(p)) => {
+            // If an adjacently/internally tagged variant (`kind` or `form`) changed,
+            // replace cleanly so stale variant fields cannot leak across merges.
+            let kind_changed = matches!((b.get("kind"), p.get("kind")), (Some(bk), Some(pk)) if bk != pk);
+            let form_changed = matches!((b.get("form"), p.get("form")), (Some(bf), Some(pf)) if bf != pf);
+            if kind_changed || form_changed {
+                return Value::Object(p);
+            }
+            for (k, v) in p {
+                match b.remove(&k) {
+                    Some(old) => {
+                        b.insert(k, json_deep_merge(old, v));
+                    }
+                    None => {
+                        b.insert(k, v);
+                    }
+                }
+            }
+            Value::Object(b.clone())
+        }
+        (_, patch) => patch,
+    }
+}
+
+fn unwrap_report_spec(raw: &Value) -> Option<(bool, Value)> {
+    let mut cur = match raw {
+        Value::String(s) => serde_json::from_str::<Value>(s).ok()?,
+        other => other.clone(),
+    };
+    let mut is_merge = cur.get("merge").and_then(Value::as_bool).unwrap_or(false);
+
+    for _ in 0..4 {
+        let Some(obj) = cur.as_object() else {
+            return None;
+        };
+        if let Some(m) = obj.get("merge").and_then(Value::as_bool) {
+            is_merge = is_merge || m;
+        }
+        if obj.contains_key("game_id")
+            || obj.contains_key("players")
+            || obj.contains_key("strategies")
+            || obj.contains_key("payoffs")
+            || obj.contains_key("params")
+        {
+            break;
+        }
+        let inner = obj
+            .get("spec")
+            .or_else(|| obj.get("arguments"))
+            .or_else(|| obj.get("input"))
+            .cloned();
+        match inner {
+            Some(Value::String(s)) => {
+                cur = serde_json::from_str::<Value>(&s).ok()?;
+            }
+            Some(other) => cur = other,
+            None => break,
+        }
+    }
+
+    if let Some(obj) = cur.as_object_mut() {
+        if let Some(m) = obj.get("merge").and_then(Value::as_bool) {
+            is_merge = is_merge || m;
+        }
+        obj.remove("merge");
+        for key in ["players", "strategies", "payoffs", "params"] {
+            if let Some(Value::String(s)) = obj.get(key) {
+                if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+                    obj.insert(key.to_string(), parsed);
+                }
+            }
+        }
+    }
+    if !cur.is_object() {
+        return None;
+    }
+    Some((is_merge, cur))
+}
+
+fn is_rollback_rewind(from: &str, to: &str, due_to: &str) -> bool {
+    if from.is_empty() || from == to {
+        return false;
+    }
+    let d = due_to.trim();
+    let dl = d.to_ascii_lowercase();
+    d.contains("（用户确认：")
+        || d.contains("模型提议")
+        || d.contains("用户同意")
+        || dl.starts_with("rollback")
+        || dl.starts_with("user_rewind")
+        || dl.starts_with("request_rewind")
+}
+
+fn clear_for_rewind(state: &mut ExtractedReportState, from: &str, to: &str, due_to: &str) {
     let target = phase_rank(to);
-    if matches!(target, Some(r) if r <= 2) {
+    let clear_target = !is_rollback_rewind(from, to, due_to);
+    let cutoff = target.map(|r| if clear_target { r } else { r + 1 });
+    if matches!(cutoff, Some(c) if c <= 2) {
         state.gamespec_args = None;
     }
-    if matches!(target, Some(r) if r <= 3) {
+    if matches!(cutoff, Some(c) if c <= 3) {
         state.solve = None;
     }
-    if matches!(target, Some(r) if r <= 4) {
+    if matches!(cutoff, Some(c) if c <= 4) {
         state.select = None;
     }
-    if matches!(target, Some(r) if r <= 5) {
+    if matches!(cutoff, Some(c) if c <= 5) {
         state.consequence = None;
     }
-    if matches!(target, Some(r) if r <= 6) {
+    if matches!(cutoff, Some(c) if c <= 6) {
         state.discovery = None;
     }
-    if matches!(target, Some(r) if r <= 7) {
+    if matches!(cutoff, Some(c) if c <= 7) {
         state.recommend = None;
+        state.scoped_result = None;
+        state.conditional = None;
     }
-    if matches!(target, Some(r) if r <= 8) {
+    if matches!(cutoff, Some(c) if c <= 8) {
         state.report_model = None;
     }
+    if target == Some(0) && clear_target {
+        state.scope = None;
+        state.scope_reason = None;
+        state.costs.clear();
+        state.constraints.clear();
+        state.constraint_check = None;
+    }
+    state.failed_tools.clear();
     for cp in &mut state.checkpoints {
-        if cp.status == "pending" {
+        if matches!(cp.status, "pending" | "answered") {
             let cp_rank = phase_rank(&cp.phase);
-            if target.is_some()
-                && cp_rank.is_some_and(|cr| cr > target.unwrap_or(0))
-                || to == "intake"
+            if cutoff.is_some_and(|c| cp_rank.is_some_and(|cr| cr >= c))
+                || (to == "intake" && clear_target)
             {
                 cp.status = "rewound";
             }
@@ -268,26 +685,32 @@ fn clear_for_rewind(state: &mut ExtractedReportState, to: &str) {
 }
 
 fn clear_for_followup(state: &mut ExtractedReportState) {
+    let was_conditional = state.scope.as_deref() == Some("conditional")
+        || state.conditional.is_some()
+        || state
+            .scoped_result
+            .as_ref()
+            .and_then(|v| v.get("scope"))
+            .and_then(Value::as_str)
+            == Some("conditional");
     state.scope = None;
     state.scope_reason = None;
-    state.gamespec_args = None;
-    state.solve = None;
-    state.select = None;
-    state.consequence = None;
-    state.discovery = None;
-    state.recommend = None;
-    state.report_model = None;
     state.scoped_result = None;
     state.conditional = None;
-    state.constraints.clear();
-    state.constraint_check = None;
-    state.costs.clear();
-    state.research_records.clear();
-    state.poi_surveys.clear();
     state.failed_tools.clear();
-    for cp in &mut state.checkpoints {
-        if cp.status == "pending" {
-            cp.status = "rewound";
+    if was_conditional {
+        state.gamespec_args = None;
+        state.solve = None;
+        state.select = None;
+        state.consequence = None;
+        state.discovery = None;
+        state.recommend = None;
+        state.report_model = None;
+        state.constraint_check = None;
+        for cp in &mut state.checkpoints {
+            if matches!(cp.status, "pending" | "answered") {
+                cp.status = "rewound";
+            }
         }
     }
 }
@@ -331,8 +754,10 @@ fn extract_case_state(source: &CaseSource) -> Result<ExtractedReportState, RunFa
             Event::PhaseEntered { to, .. } => {
                 state.phases.push(to);
             }
-            Event::PhaseRewound { to, .. } => {
-                clear_for_rewind(&mut state, &to);
+            Event::PhaseRewound {
+                from, to, due_to, ..
+            } => {
+                clear_for_rewind(&mut state, &from, &to, &due_to);
                 state.phases.push(format!("回退→{to}"));
             }
             Event::FollowupTaskStarted { .. } => {
@@ -380,6 +805,7 @@ fn extract_case_state(source: &CaseSource) -> Result<ExtractedReportState, RunFa
                 }
             }
             Event::ScopedTaskCompleted { result, .. } => {
+                state.scope = Some(result.scope.as_str().to_string());
                 for u in &result.source_urls {
                     if !u.trim().is_empty() {
                         state.web_sources.insert(u.clone());
@@ -428,10 +854,19 @@ fn extract_case_state(source: &CaseSource) -> Result<ExtractedReportState, RunFa
                         let parsed = serde_json::from_str::<Value>(&output).unwrap_or(Value::Null);
                         match inv.name.as_str() {
                             "gamespec_build" => {
-                                if inv.arguments.get("players").is_some()
-                                    && inv.arguments.get("strategies").is_some()
+                                if let Some((is_merge, spec_patch)) =
+                                    unwrap_report_spec(&inv.arguments)
                                 {
-                                    state.gamespec_args = Some(inv.arguments);
+                                    if is_merge {
+                                        state.gamespec_args = Some(match state.gamespec_args.take() {
+                                            Some(prev) => json_deep_merge(prev, spec_patch),
+                                            None => spec_patch,
+                                        });
+                                    } else if spec_patch.get("players").is_some()
+                                        && spec_patch.get("strategies").is_some()
+                                    {
+                                        state.gamespec_args = Some(spec_patch);
+                                    }
                                 }
                             }
                             "solve_equilibria" => {
@@ -492,7 +927,19 @@ fn extract_case_state(source: &CaseSource) -> Result<ExtractedReportState, RunFa
                                     state.constraint_check = Some(parsed);
                                 }
                             }
+                            "select_task_scope" => {
+                                if let Some(sc) = parsed.get("scope").and_then(Value::as_str) {
+                                    state.scope = Some(sc.to_string());
+                                }
+                            }
                             "conditional_analysis" => {
+                                state.scope = Some(
+                                    parsed
+                                        .get("scope")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("conditional")
+                                        .to_string(),
+                                );
                                 if !parsed.is_null() {
                                     if let Some(cond) = parsed.get("conditional").filter(|c| !c.is_null()) {
                                         state.conditional = Some(cond.clone());
@@ -960,4 +1407,263 @@ fn format_markdown_report(source: &CaseSource, state: &ExtractedReportState) -> 
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sanitize_filename_blocks_traversal_and_special_chars() {
+        assert_eq!(sanitize_filename("case-20261114-demo"), "case-20261114-demo");
+        assert_eq!(sanitize_filename("../etc/passwd"), "___etc_passwd");
+        assert_eq!(sanitize_filename("a:b\\c/d"), "a_b_c_d");
+        assert_eq!(sanitize_filename(".."), "shangyi-report");
+        assert_eq!(sanitize_filename("."), "shangyi-report");
+        assert_eq!(sanitize_filename("   "), "shangyi-report");
+    }
+
+    #[test]
+    fn unwrap_report_spec_and_merge_update_params_cleanly() {
+        let base_call = json!({
+            "game_id": "g1",
+            "players": [{"id": "us", "name": "我方"}, {"id": "comp", "name": "对手"}],
+            "strategies": {"us": ["A"], "comp": ["B"]},
+            "params": {
+                "k_aa_1": {
+                    "name": "单杯毛利",
+                    "value": {"kind": "literal", "value": 40},
+                    "source": {"kind": "user_confirmed", "checkpoint": "cp2"},
+                    "unit": "元"
+                }
+            }
+        });
+        let (m0, v0) = unwrap_report_spec(&base_call).unwrap();
+        assert!(!m0);
+
+        let patch_call = json!({
+            "merge": true,
+            "spec": {
+                "params": {
+                    "k_aa_1": {
+                        "value": {"kind": "literal", "value": 42}
+                    }
+                }
+            }
+        });
+        let (m1, v1) = unwrap_report_spec(&patch_call).unwrap();
+        assert!(m1);
+
+        let merged = json_deep_merge(v0, v1);
+        assert_eq!(merged["params"]["k_aa_1"]["value"]["value"], json!(42));
+        assert_eq!(merged["params"]["k_aa_1"]["name"], json!("单杯毛利"));
+        assert_eq!(merged["params"]["k_aa_1"]["unit"], json!("元"));
+        assert_eq!(merged["params"]["k_aa_1"]["source"]["checkpoint"], json!("cp2"));
+    }
+
+    #[test]
+    fn clear_for_rewind_revokes_checkpoints_at_or_after_target_consistently() {
+        let mut st = ExtractedReportState::default();
+        st.gamespec_args = Some(json!({"game_id": "g1"}));
+        st.solve = Some(json!({"route": "exact"}));
+        st.checkpoints = vec![
+            CheckpointEntry {
+                id: "cp1".into(),
+                phase: "intel".into(),
+                items: vec![],
+                status: "answered",
+                answers: vec!["ok".into()],
+                actor: Some("user".into()),
+                at: "t1".into(),
+            },
+            CheckpointEntry {
+                id: "cp2".into(),
+                phase: "model_build".into(),
+                items: vec![],
+                status: "answered",
+                answers: vec!["ok".into()],
+                actor: Some("user".into()),
+                at: "t2".into(),
+            },
+            CheckpointEntry {
+                id: "cp3".into(),
+                phase: "select".into(),
+                items: vec![],
+                status: "pending",
+                answers: vec![],
+                actor: None,
+                at: "t3".into(),
+            },
+        ];
+
+        clear_for_rewind(&mut st, "solve", "model_build", "重设参数");
+        assert!(st.gamespec_args.is_none());
+        assert!(st.solve.is_none());
+        assert_eq!(st.checkpoints[0].status, "answered", "早于 target 的 cp1 保留");
+        assert_eq!(st.checkpoints[1].status, "rewound", "invalidation 回退 target 处的 cp2 应作废");
+        assert_eq!(st.checkpoints[2].status, "rewound", "下游 cp3 应作废");
+
+        // In-place reconsider (from == to) also clears model_build and cp2
+        st.gamespec_args = Some(json!({"game_id": "g1"}));
+        st.checkpoints[1].status = "pending";
+        clear_for_rewind(&mut st, "model_build", "model_build", "用户修改了本轮材料");
+        assert!(st.gamespec_args.is_none());
+        assert_eq!(st.checkpoints[1].status, "rewound");
+
+        // Cross-phase rollback_to (request_rewind) preserves target model_build's gamespec and cp2
+        st.gamespec_args = Some(json!({"game_id": "g1"}));
+        st.solve = Some(json!({"route": "exact"}));
+        st.checkpoints[1].status = "answered";
+        st.checkpoints[2].status = "answered";
+        clear_for_rewind(
+            &mut st,
+            "select",
+            "model_build",
+            "补充参数来源（用户确认：同意回退到 model_build）",
+        );
+        assert!(
+            st.gamespec_args.is_some(),
+            "request_rewind(to=model_build) 必须保留 model_build 自身的 gamespec 以供 merge=true 增量更新"
+        );
+        assert!(st.solve.is_none(), "下游 solve 必须清除");
+        assert_eq!(st.checkpoints[0].status, "answered");
+        assert_eq!(st.checkpoints[1].status, "answered", "request_rewind(to=model_build) 保留 cp2");
+        assert_eq!(st.checkpoints[2].status, "rewound", "严格下游已答 cp3 也须作废");
+
+        // Rollback rewind to intake preserves unknown-phase / intake checkpoints while rewinding intel+
+        st.checkpoints.push(CheckpointEntry {
+            id: "cp0".into(),
+            phase: "intake".into(),
+            items: vec![],
+            status: "answered",
+            answers: vec!["ok".into()],
+            actor: Some("user".into()),
+            at: "t0".into(),
+        });
+        clear_for_rewind(&mut st, "model_build", "intake", "rollback: 回到 intake 保留起始记录");
+        assert_eq!(st.checkpoints[0].status, "rewound", "rollback(to=intake) 仍须作废 intel 关口 cp1");
+        assert_eq!(st.checkpoints[3].status, "answered", "rollback(to=intake) 不应误清除 intake 关口");
+    }
+
+    #[test]
+    fn json_deep_merge_replaces_variant_objects_on_discriminator_change() {
+        let base = json!({
+            "source": {"kind": "public_data", "provenance": "年报"},
+            "payoffs": {"form": "normal", "values": {"cells": {"a,b": {"us": 1}}}}
+        });
+        let patch = json!({
+            "source": {"kind": "user_confirmed", "checkpoint": "cp2"},
+            "payoffs": {"form": "extensive", "values": {"tree": {"root": "n0"}}}
+        });
+        let merged = json_deep_merge(base, patch);
+        assert_eq!(merged["source"]["kind"], json!("user_confirmed"));
+        assert!(merged["source"].get("provenance").is_none());
+        assert_eq!(merged["payoffs"]["form"], json!("extensive"));
+        assert!(merged["payoffs"]["values"].get("cells").is_none());
+    }
+
+    #[test]
+    fn clear_for_followup_preserves_evidence_costs_constraints_and_poi() {
+        let mut st = ExtractedReportState::default();
+        st.scope = Some("cost".into());
+        st.scope_reason = Some("费用测算".into());
+        st.scoped_result = Some(json!({"scope": "cost"}));
+        st.costs.insert("s1".into(), json!({"scenario_id": "s1"}));
+        st.constraints.push(json!({"limit": 100000}));
+        st.research_records.push(json!({"topic": "rent"}));
+        st.poi_surveys.push(json!({"address": "人民广场"}));
+        st.web_sources.insert("https://example.com".into());
+
+        clear_for_followup(&mut st);
+        assert!(st.scope.is_none());
+        assert!(st.scoped_result.is_none());
+        assert_eq!(st.costs.len(), 1);
+        assert_eq!(st.constraints.len(), 1);
+        assert_eq!(st.research_records.len(), 1);
+        assert_eq!(st.poi_surveys.len(), 1);
+        assert_eq!(st.web_sources.len(), 1);
+
+        // Conditional followup invalidates prior model/solve artifacts while preserving evidence
+        st.scope = Some("conditional".into());
+        st.conditional = Some(json!({"limitations": ["missing"]}));
+        st.gamespec_args = Some(json!({"game_id": "g1"}));
+        st.solve = Some(json!({"route": "exact"}));
+        clear_for_followup(&mut st);
+        assert!(st.gamespec_args.is_none());
+        assert!(st.solve.is_none());
+        assert_eq!(st.costs.len(), 1);
+        assert_eq!(st.poi_surveys.len(), 1);
+    }
+
+    #[test]
+    fn clear_for_followup_rewinds_answered_cp1_only_when_conditional() {
+        let mut st = ExtractedReportState::default();
+        st.scope = Some("cost".into());
+        st.checkpoints = vec![
+            CheckpointEntry {
+                id: "cp1".into(),
+                phase: "intel".into(),
+                items: vec!["竞品定价".into()],
+                status: "answered",
+                answers: vec!["确认：18 元".into()],
+                actor: Some("user".into()),
+                at: "t1".into(),
+            },
+            CheckpointEntry {
+                id: "cp2".into(),
+                phase: "model_build".into(),
+                items: vec!["收益矩阵".into()],
+                status: "pending",
+                answers: vec![],
+                actor: None,
+                at: "t2".into(),
+            },
+        ];
+
+        // Non-conditional followup preserves prior answered and pending checkpoints
+        clear_for_followup(&mut st);
+        assert_eq!(st.checkpoints[0].status, "answered", "非条件 followup 必须保留已确认的 cp1");
+        assert_eq!(st.checkpoints[1].status, "pending", "非条件 followup 不得撤销 cp2");
+
+        // Conditional followup must mark both pending and answered prior checkpoints as rewound
+        st.scope = Some("conditional".into());
+        st.conditional = Some(json!({"limitations": ["missing"]}));
+        st.gamespec_args = Some(json!({"game_id": "g1"}));
+        clear_for_followup(&mut st);
+        assert!(st.gamespec_args.is_none());
+        assert_eq!(st.checkpoints[0].status, "rewound", "条件交付后 followup 必须将已确认 cp1 标为 rewound");
+        assert_eq!(st.checkpoints[1].status, "rewound", "条件交付后 followup 必须将待决 cp2 标为 rewound");
+
+        // End-to-end extract_case_state check: answered cp1 -> conditional_analysis -> FollowupTaskStarted
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "shangyi-report-unit-cond-fu-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let log_path = tmp_dir.join("case.jsonl");
+        let lines = [
+            json!({"seq": 1, "event": {"type": "task_scope_selected", "scope": "consultation", "reason": "完整推演", "at": "t1"}}),
+            json!({"seq": 2, "event": {"type": "phase_entered", "from": "intake", "to": "intel", "playbook": "pricing_response", "reason": "ok", "at": "t2"}}),
+            json!({"seq": 3, "event": {"type": "checkpoint_opened", "id": "cp1", "phase": "intel", "items": ["情报"], "at": "t3"}}),
+            json!({"seq": 4, "event": {"type": "checkpoint_answered", "id": "cp1", "answers": ["确认"], "user_actor": "user", "at": "t4"}}),
+            json!({"seq": 5, "event": {"type": "tool_call_started", "step": {"turn": 1, "step": 1}, "call_id": "ca1", "name": "conditional_analysis", "arguments": "{}", "at": "t5"}}),
+            json!({"seq": 6, "event": {"type": "tool_call_finished", "call_id": "ca1", "outcome": {"status": "ok", "output": "{\"scope\":\"conditional\",\"summary\":\"条件结论\",\"conditional\":{\"limitations\":[\"缺毛利\"]}}"}, "at": "t6"}}),
+            json!({"seq": 7, "event": {"type": "followup_task_started", "at": "t7"}}),
+        ];
+        let body = lines.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n") + "\n";
+        std::fs::write(&log_path, body).unwrap();
+        let extracted = extract_case_state(&CaseSource {
+            case_id: "case-unit-cond-fu".into(),
+            log_path,
+            header: None,
+        })
+        .unwrap();
+        assert_eq!(extracted.bad_lines, 0);
+        assert_eq!(extracted.checkpoints.len(), 1);
+        assert_eq!(extracted.checkpoints[0].id, "cp1");
+        assert_eq!(extracted.checkpoints[0].status, "rewound");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
 }

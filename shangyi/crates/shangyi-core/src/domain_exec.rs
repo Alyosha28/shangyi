@@ -544,10 +544,9 @@ fn diagnose_unbalanced_json(s: &str) -> String {
         }
         out.push_str(
             "→ **建议**：不要直接重写整段（通常仍会错在同一处）。改为**分两步**：\
-             先建一个最小可解的博弈（players + strategies + 空 cells + 空 params），\
-             确认通过后**再带 `merge: true` 调一次 `gamespec_build`** 补参数\
-             （`merge: true` 会深合并进已有的 spec——\
-             「先骨架、后填充」是这条路唯一可行的走法）。\
+             先建一个**最小可校验骨架**（`players` + `strategies` + 至少覆盖策略组合的初始字面量 `payoffs.values.cells` + 空 `params: {}`），\
+             校验通过后**再带 `merge: true` 调一次 `gamespec_build`** 补参数与 `ref` 引用\
+             （`merge: true` 会深合并进已有的 spec，且 `cells` 首次建立时不能为空 `{}`）。\
              长嵌套 JSON 一次写对的概率随长度下降，分两次写更稳。",
         );
     } else if braces < 0 || brackets < 0 {
@@ -672,6 +671,15 @@ fn sample_from_dist(rng: &mut shangyi_consequence::Lcg, dist: &shangyi_gamespec:
 fn deep_merge(mut base: serde_json::Value, patch: serde_json::Value) -> serde_json::Value {
     match (&mut base, patch) {
         (serde_json::Value::Object(b), serde_json::Value::Object(p)) => {
+            // If an adjacently/internally tagged variant (`kind` or `form`) changed,
+            // replace cleanly so stale variant fields cannot leak across merges.
+            let kind_changed =
+                matches!((b.get("kind"), p.get("kind")), (Some(bk), Some(pk)) if bk != pk);
+            let form_changed =
+                matches!((b.get("form"), p.get("form")), (Some(bf), Some(pf)) if bf != pf);
+            if kind_changed || form_changed {
+                return serde_json::Value::Object(p);
+            }
             for (k, v) in p {
                 match b.remove(&k) {
                     Some(old) => {
@@ -1287,6 +1295,22 @@ pub trait SwarmActorFactory<'a> {
     ) -> Box<dyn shangyi_swarm::llm_actor::TracedPersonaActor + 'a>;
 }
 
+/// 构造指向显式 OpenAI Chat Completions 端点的离线测试 `SwarmActorFactory`（不读环境变量、不触及真实密钥）。
+#[doc(hidden)]
+pub fn openai_swarm_actor_factory_for_test(
+    base_url: &str,
+    model: &str,
+) -> Box<dyn SwarmActorFactory<'static>> {
+    let client = shangyi_llm::LlmClient::new(
+        shangyi_llm::Endpoint::openai_chat(base_url, "SHANGYI_TEST_KEY", false),
+        shangyi_llm::UreqTransport,
+    )
+    .with_key("test-key");
+    let leaked: &'static shangyi_llm::LlmClient<shangyi_llm::UreqTransport> =
+        Box::leak(Box::new(client));
+    Box::new(crate::providers::LlmSwarmActorFactory::new(leaked, model))
+}
+
 impl<'a> DomainExecutor<'a> {
     pub fn new(theory: &'a TheoryLibrary, playbook: &'a Playbook) -> Self {
         Self {
@@ -1385,6 +1409,144 @@ impl<'a> DomainExecutor<'a> {
             pages.insert(requested_url.to_string(), page.clone());
         }
         pages.insert(final_url.to_string(), page);
+    }
+
+    /// 恢复已落盘的 `poi_survey` 结构化回执快照（供 `--resume` 离线重放，不发起高德网络请求）。
+    pub fn restore_poi_receipts(&mut self, call_id: &str, output_json: &str) {
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(output_json) else {
+            return;
+        };
+        let address = payload
+            .get("address")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let radius = payload
+            .get("radius")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(500);
+        let source = payload
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("高德 POI")
+            .to_string();
+        let scope = if address.is_empty() {
+            format!("poi:{}m", radius)
+        } else {
+            format!("{address} · {radius} 米")
+        };
+        if let Some(receipts) = payload.get("receipts").and_then(serde_json::Value::as_array) {
+            for (idx, item) in receipts.iter().enumerate() {
+                let id = item
+                    .get("receipt")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{call_id}#{}", idx + 1));
+                let Some(val) = item.get("value").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                self.state.structured_receipts.insert(
+                    id.clone(),
+                    crate::research_task::StructuredEvidence {
+                        receipt: id,
+                        kind: "高德 POI 周边计数".into(),
+                        scope: scope.clone(),
+                        value: val.to_string(),
+                        source: source.clone(),
+                    },
+                );
+            }
+        }
+        self.state.task_retrieval_attempts += 1;
+        if let Some(task) = self.state.research_task.as_mut() {
+            task.observe_poi(&scope, true, None, self.state.retrieval_attempts.get(), 16);
+        }
+    }
+
+    /// 恢复已落盘的 `poi_survey` 受阻记录（供 `--resume` 离线重放，维持研究任务尝试计数）。
+    pub fn restore_poi_blocked(&mut self, args: &serde_json::Value, detail: &str) {
+        let address = args
+            .get("address")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let radius = args.get("radius").and_then(serde_json::Value::as_u64).unwrap_or(500);
+        let poi_label = format!(
+            "poi:{}@{}m",
+            if address.is_empty() { "unset" } else { address },
+            radius
+        );
+        self.state.task_retrieval_attempts += 1;
+        self.state.task_gaps.push(detail.to_string());
+        if let Some(task) = self.state.research_task.as_mut() {
+            task.observe_poi(
+                &poi_label,
+                false,
+                Some(detail),
+                self.state.retrieval_attempts.get(),
+                16,
+            );
+        }
+    }
+
+    /// 恢复已落盘的 `data_ingest` 解析报告快照（供 `--resume` 离线重放，不启动侧车或读取磁盘 CSV）。
+    pub fn restore_ingested_report(&mut self, output_json: &str) {
+        let Ok(report) = serde_json::from_str::<shangyi_intel::sidecar::IngestReport>(output_json) else {
+            return;
+        };
+        self.state.ingested = self
+            .state
+            .ingested
+            .iter()
+            .cloned()
+            .chain(std::iter::once(report))
+            .collect();
+    }
+
+    /// 恢复已落盘的 `swarm_run` 输出与已接受的非常规策略注册（供 `--resume` 离线重放，不发起 LLM 请求）。
+    pub fn restore_swarm_output(&mut self, output_json: &str) {
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(output_json) else {
+            return;
+        };
+        self.state.swarm_output = Some(payload.clone());
+        let registered = payload
+            .get("counts")
+            .and_then(|c| c.get("novel_moves_registered"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if registered > 0 {
+            if let Some(spec) = self.state.game_spec.as_mut() {
+                if let Some(verdicts) = payload
+                    .get("novel_move_verdicts")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    for item in verdicts {
+                        if item.get("accepted").and_then(serde_json::Value::as_bool) != Some(true)
+                        {
+                            continue;
+                        }
+                        let Some(actor) = item.get("actor").and_then(serde_json::Value::as_str)
+                        else {
+                            continue;
+                        };
+                        let Some(action) = item.get("action").and_then(serde_json::Value::as_str)
+                        else {
+                            continue;
+                        };
+                        if spec.players.iter().any(|pl| {
+                            pl.id == actor
+                                && pl.relation_to_game == shangyi_gamespec::RelationToGame::Player
+                        }) {
+                            let label = format!("[非常规] {action}");
+                            let strategies = spec.strategies.entry(actor.to_string()).or_default();
+                            if !strategies.contains(&label) {
+                                strategies.push(label);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// 绑定检索后端。未绑定 ⇒ `web_search`/`web_fetch` 返回 `Blocked`。
@@ -1678,7 +1840,7 @@ impl<'a> DomainExecutor<'a> {
                     // 报这个错说明某个邻接标记枚举缺了内容对象。
                     "\n→ **哪个对象缺 content？** 邻接标记枚举（payoffs / dynamics）\
                      都需要一个 `values` 对象装内容：\n\
-                     · `payoffs`：{\"form\":\"normal\",\"values\":{\"cells\":{…}}}\n\
+                     · `payoffs`：{\"form\":\"normal\",\"values\":{\"cells\":{\"策略A,策略B\":{\"p1\":{\"kind\":\"literal\",\"value\":0},\"p2\":{\"kind\":\"literal\",\"value\":0}}}}}\n\
                      · `dynamics`：{\"form\":\"repeated\",\"values\":{\"discount\":0.9}}\n\
                      注意 `OneShot` 是**无内容变体**，写 {\"form\":\"one_shot\"} 即可，不要带 values。\n"
                 } else if err.contains("checkpoint") {
@@ -1703,8 +1865,10 @@ impl<'a> DomainExecutor<'a> {
                      {{\"kind\":\"literal\",\"value\":N}} 或 {{\"kind\":\"ref\",\"value\":\"参数名\"}}，裸数字会被拒\n\
                      - `params`: 对象（可为空 {{}}）\n\
                      \n\
-                     若这份 spec 太长、一次写不完整，**先删掉参数只建骨架**，\
-                     再带 `merge: true` 调一次补上——那是允许的两步写法。\n\
+                     若这份 spec 太长、一次写不完整，**第一步可先搭「最小可校验骨架」**\
+                     （含 `players`、`strategies`、至少各策略组合的初始字面量 `payoffs.values.cells`，以及 `params: {{}}`），\
+                     **再带 `merge: true` 分步补齐 `params` 与 `ref` 引用**——\
+                     注意 `cells` 本身不能为空 `{{}}`，且仅可使用已获来源证实或经用户确认的数值。\n\
                      \n\
                      \n常见错误：\n\
                      ① 忘了 `players[].name`（本项必填，即使与 id 相同也要写）\n\
@@ -2424,20 +2588,33 @@ impl<'a> DomainExecutor<'a> {
 
     /// 本模式下、当前状态下可用的**建议依据**。
     ///
-    /// 见 `recommend_build` 的注释：依据按模式而异，而共同点必须是
-    /// **引擎算出来的**（不是模型的主张）。
+    /// 按 `self.mode` 分派，保证 `discover` 在前置 `consequence_predict` 后
+    /// 不会被 `consequence_report` 遮蔽；`scenario` 在孤立单测未显式切模式时
+    /// 保留已有产物的回退路径。
     fn recommendation_basis(&self) -> Option<RecommendationBasis> {
-        // 优先级：分布最强（它同时含概率与置信度）
-        if self.state.distribution.is_some() {
-            return Some(RecommendationBasis::EquilibriumDistribution);
+        match self.mode {
+            crate::ConsultationMode::Discover => self
+                .state
+                .discovery_report
+                .as_ref()
+                .map(|_| RecommendationBasis::DiscoveryReport),
+            crate::ConsultationMode::Whatif => self
+                .state
+                .consequence_report
+                .as_ref()
+                .map(|_| RecommendationBasis::ConsequenceReport),
+            crate::ConsultationMode::Scenario => {
+                if self.state.distribution.is_some() {
+                    Some(RecommendationBasis::EquilibriumDistribution)
+                } else if self.state.consequence_report.is_some() {
+                    Some(RecommendationBasis::ConsequenceReport)
+                } else if self.state.discovery_report.is_some() {
+                    Some(RecommendationBasis::DiscoveryReport)
+                } else {
+                    None
+                }
+            }
         }
-        if self.state.consequence_report.is_some() {
-            return Some(RecommendationBasis::ConsequenceReport);
-        }
-        if self.state.discovery_report.is_some() {
-            return Some(RecommendationBasis::DiscoveryReport);
-        }
-        None
     }
 
     /// 当前时间（Unix 毫秒）。**画像时间戳的唯一来源**。
@@ -3466,9 +3643,11 @@ impl<'a> DomainExecutor<'a> {
                 let v = game.payoff(opp_pos, &full);
                 best.push((s_idx, v));
             }
-            let max = best.iter().map(|(_, v)| *v).fold(shangyi_solver::Rational::ZERO, |a, b| {
-                if b > a { b } else { a }
-            });
+            let max = best
+                .iter()
+                .map(|(_, v)| *v)
+                .reduce(|a, b| if b > a { b } else { a })
+                .expect("opp_counts > 0 checked above");
             let winners: Vec<usize> = best
                 .iter()
                 .filter(|(_, v)| *v == max)
@@ -3587,7 +3766,7 @@ impl<'a> DomainExecutor<'a> {
         let n = sol.equilibria.len() as f64;
         let equal_weight = 1.0 / n;
         let mut reactions = Vec::with_capacity(sol.equilibria.len());
-        for (i, eq) in sol.equilibria.iter().enumerate() {
+        for eq in &sol.equilibria {
             // 反应的文字表示：对手各自的策略名
             let mut reaction = String::new();
             for (op, id) in opponents.iter().enumerate() {
@@ -3601,21 +3780,19 @@ impl<'a> DomainExecutor<'a> {
                 }
                 reaction.push_str(&format!("{}:{}", id, sup.join("/")));
             }
-            // 各方结果：**点估计**（参数未声明 dist 时无从给区间）
+            // 各方结果：**点估计**（按混合均衡策略分布精确计算全员期望支付，含我方与所有对手）
+            let mut sigma: Vec<Vec<shangyi_solver::Rational>> = (0..players.len())
+                .map(|p| vec![shangyi_solver::Rational::ZERO; game.strategy_count(p)])
+                .collect();
+            sigma[focal_pos][d_idx] = shangyi_solver::Rational::ONE;
+            for (op, oid) in opponents.iter().enumerate() {
+                let p_pos = players.iter().position(|p| p == oid).expect("opponent in players");
+                sigma[p_pos] = eq.strategy[op].clone();
+            }
+            let expected = shangyi_solver::verify::expected_payoffs(&game, &sigma);
             let mut outcomes = BTreeMap::new();
-            for (op, id) in opponents.iter().enumerate() {
-                let v = game.payoff(
-                    players.iter().position(|p| p == id).unwrap_or(0),
-                    &{
-                        let mut full = vec![0usize; players.len()];
-                        for (k, oid) in opponents.iter().enumerate() {
-                            full[players.iter().position(|p| p == oid).unwrap_or(0)] =
-                                eq.support[k][0];
-                        }
-                        full[focal_pos] = d_idx;
-                        full
-                    },
-                ).to_f64();
+            for (p, id) in players.iter().enumerate() {
+                let v = expected[p].to_f64();
                 outcomes.insert(
                     id.clone(),
                     shangyi_consequence::Percentiles {
@@ -4498,58 +4675,78 @@ impl<'a> DomainExecutor<'a> {
             Vec<f64>,
             BTreeMap<String, f64>,
             shangyi_kb::PredictionKind,
-        ) = if let Some(dist) = &self.state.distribution {
-            (
-                dist.entries.iter().map(|e| e.equilibrium_id.clone()).collect(),
-                dist.entries.iter().map(|e| e.prob).collect(),
-                // 权重快照：未校准时给等权（**如实如此**，不假装已校准）
-                dist.entries
-                    .iter()
-                    .flat_map(|e| e.drivers.iter())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .map(|s| (s.as_str().to_string(), 1.0))
-                    .collect(),
-                shangyi_kb::PredictionKind::EquilibriumDistribution,
-            )
-        } else if let Some(cr) = &self.state.consequence_report {
-            (
-                cr.reactions.iter().map(|r| r.reaction.clone()).collect(),
-                cr.reactions.iter().map(|r| r.probability).collect(),
-                // whatif 没有判据权重（没走 select），如实给空表
-                BTreeMap::new(),
-                // 对手必选其一 ⇒ 反应概率是**归一化**的分布
-                shangyi_kb::PredictionKind::ConditionalReactions,
-            )
-        } else if let Some(dr) = &self.state.discovery_report {
-            (
-                dr.satisfied
-                    .iter()
-                    .map(|s| s.candidate.id.clone())
-                    .collect(),
-                dr.satisfied
-                    .iter()
-                    .map(|s| {
-                        s.criteria
-                            .iter()
-                            .map(|c| c.achieved_probability)
-                            .fold(f64::INFINITY, f64::min)
-                    })
-                    .collect(),
-                BTreeMap::new(),
-                // 达标概率**不归一化**（多个候选可同时达标）——见该变体的说明
-                shangyi_kb::PredictionKind::SatisficingAchievement,
-            )
-        } else {
-            return ExecOutcome::Failed(
-                "尚无「此刻的预测」可归档——需要下列之一（取决于模式）：\n\
-                 · scenario：`select_fuse` 的均衡概率分布\n\
-                 · whatif：`consequence_predict` 的条件后果报告\n\
-                 · discover：`discover_satisfice` 的满意策略评估\n\
-                 归档必须带上预测——否则事后有结果也无从比对，\
-                 那份记录对校准毫无用处。"
-                    .into(),
-            );
+        ) = match self.recommendation_basis() {
+            Some(RecommendationBasis::EquilibriumDistribution) => {
+                let dist = self
+                    .state
+                    .distribution
+                    .as_ref()
+                    .expect("basis checked");
+                (
+                    dist.entries.iter().map(|e| e.equilibrium_id.clone()).collect(),
+                    dist.entries.iter().map(|e| e.prob).collect(),
+                    // 权重快照：未校准时给等权（**如实如此**，不假装已校准）
+                    dist.entries
+                        .iter()
+                        .flat_map(|e| e.drivers.iter())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .map(|s| (s.as_str().to_string(), 1.0))
+                        .collect(),
+                    shangyi_kb::PredictionKind::EquilibriumDistribution,
+                )
+            }
+            Some(RecommendationBasis::ConsequenceReport) => {
+                let cr = self
+                    .state
+                    .consequence_report
+                    .as_ref()
+                    .expect("basis checked");
+                (
+                    cr.reactions.iter().map(|r| r.reaction.clone()).collect(),
+                    cr.reactions.iter().map(|r| r.probability).collect(),
+                    // whatif 没有判据权重（没走 select），如实给空表
+                    BTreeMap::new(),
+                    // 对手必选其一 ⇒ 反应概率是**归一化**的分布
+                    shangyi_kb::PredictionKind::ConditionalReactions,
+                )
+            }
+            Some(RecommendationBasis::DiscoveryReport) => {
+                let dr = self
+                    .state
+                    .discovery_report
+                    .as_ref()
+                    .expect("basis checked");
+                (
+                    dr.satisfied
+                        .iter()
+                        .map(|s| s.candidate.id.clone())
+                        .collect(),
+                    dr.satisfied
+                        .iter()
+                        .map(|s| {
+                            s.criteria
+                                .iter()
+                                .map(|c| c.achieved_probability)
+                                .fold(f64::INFINITY, f64::min)
+                        })
+                        .collect(),
+                    BTreeMap::new(),
+                    // 达标概率**不归一化**（多个候选可同时达标）——见该变体的说明
+                    shangyi_kb::PredictionKind::SatisficingAchievement,
+                )
+            }
+            None => {
+                return ExecOutcome::Failed(
+                    "尚无「此刻的预测」可归档——需要下列之一（取决于模式）：\n\
+                     · scenario：`select_fuse` 的均衡概率分布\n\
+                     · whatif：`consequence_predict` 的条件后果报告\n\
+                     · discover：`discover_satisfice` 的满意策略评估\n\
+                     归档必须带上预测——否则事后有结果也无从比对，\
+                     那份记录对校准毫无用处。"
+                        .into(),
+                );
+            }
         };
 
         let case_id = args
@@ -4820,149 +5017,152 @@ impl<'a> DomainExecutor<'a> {
         let mut boss = Section::new("boss_page", "一页结论");
         let mut boss_numbers: Vec<String> = Vec::new();
 
-        if let Some(dist) = &self.state.distribution {
-            if let Some((top, ties)) = dist.most_likely() {
-                let pid = ProvenanceId("prov_dist".into());
-                // 必须注册到 **report 自己的台账**（`Report::add_number` 查的是它，
-                // 不是任何局部 ledger——早先的写法正因此报"数字缺少 provenance"）
-                if let Err(e) = report.register_provenance(
-                    ProvenanceRecord::new("prov_dist", ProvenanceKind::CodeComputed, 0)
-                        // 溯源到**哪个引擎**算的，而不只是"某个工具"
-                        .with_code("shangyi-selection", "0.1.0", "fuse"),
-                ) {
-                    return ExecOutcome::Failed(format!("provenance 注册失败：{e}"));
-                }
-                let key = "prob_most_likely";
-                if let Err(e) = report.add_number(
-                    Number::new(
-                        key,
-                        top.prob,
-                        format!("均衡「{}」的概率", top.equilibrium_id),
-                        pid,
-                    )
-                    .with_unit("概率"),
-                ) {
-                    return ExecOutcome::Failed(format!("数字登记失败：{e}"));
-                }
-                boss_numbers.push(key.to_string());
-                let tie_note = if ties {
-                    "（存在并列——最高概率不唯一，请勿只报一个）"
-                } else {
-                    ""
-                };
-                boss = boss.with_paragraph(format!(
-                    "最可能的均衡是「{}」，概率 {:.1}%{}。",
-                    top.equilibrium_id,
-                    top.prob * 100.0,
-                    tie_note
-                ));
-                if !top.drivers.is_empty() {
+        match self.recommendation_basis() {
+            Some(RecommendationBasis::EquilibriumDistribution) => {
+                let dist = self
+                    .state
+                    .distribution
+                    .as_ref()
+                    .expect("basis checked");
+                if let Some((top, ties)) = dist.most_likely() {
+                    let pid = ProvenanceId("prov_dist".into());
+                    // 必须注册到 **report 自己的台账**（`Report::add_number` 查的是它，
+                    // 不是任何局部 ledger——早先的写法正因此报"数字缺少 provenance"）
+                    if let Err(e) = report.register_provenance(
+                        ProvenanceRecord::new("prov_dist", ProvenanceKind::CodeComputed, 0)
+                            // 溯源到**哪个引擎**算的，而不只是"某个工具"
+                            .with_code("shangyi-selection", "0.1.0", "fuse"),
+                    ) {
+                        return ExecOutcome::Failed(format!("provenance 注册失败：{e}"));
+                    }
+                    let key = "prob_most_likely";
+                    if let Err(e) = report.add_number(
+                        Number::new(
+                            key,
+                            top.prob,
+                            format!("均衡「{}」的概率", top.equilibrium_id),
+                            pid,
+                        )
+                        .with_unit("概率"),
+                    ) {
+                        return ExecOutcome::Failed(format!("数字登记失败：{e}"));
+                    }
+                    boss_numbers.push(key.to_string());
+                    let tie_note = if ties {
+                        "（存在并列——最高概率不唯一，请勿只报一个）"
+                    } else {
+                        ""
+                    };
                     boss = boss.with_paragraph(format!(
-                        "主要判据：{}。",
-                        top.drivers
-                            .iter()
-                            .map(|d| d.as_str())
-                            .collect::<Vec<_>>()
-                            .join("、")
+                        "最可能的均衡是「{}」，概率 {:.1}%{}。",
+                        top.equilibrium_id,
+                        top.prob * 100.0,
+                        tie_note
+                    ));
+                    if !top.drivers.is_empty() {
+                        boss = boss.with_paragraph(format!(
+                            "主要判据：{}。",
+                            top.drivers
+                                .iter()
+                                .map(|d| d.as_str())
+                                .collect::<Vec<_>>()
+                                .join("、")
+                        ));
+                    }
+                }
+                // 置信度必须如实进老板页（不得藏在附录）
+                boss = boss.with_paragraph(format!("置信度：{}", dist.confidence.note()));
+                if !dist.divergences.is_empty() {
+                    boss = boss.with_paragraph(format!(
+                        "⚠ 判据存在分歧（{} 条）：{}",
+                        dist.divergences.len(),
+                        dist.divergences.join("；")
                     ));
                 }
             }
-            // 置信度必须如实进老板页（不得藏在附录）
-            boss = boss.with_paragraph(format!("置信度：{}", dist.confidence.note()));
-            if !dist.divergences.is_empty() {
+            Some(RecommendationBasis::ConsequenceReport) => {
+                let cr = self
+                    .state
+                    .consequence_report
+                    .as_ref()
+                    .expect("basis checked");
+                if let Err(e) = report.register_provenance(
+                    ProvenanceRecord::new("prov_consequence", ProvenanceKind::CodeComputed, 0)
+                        .with_code("shangyi-consequence", "0.1.0", "residual_subgame"),
+                ) {
+                    return ExecOutcome::Failed(format!("provenance 注册失败：{e}"));
+                }
                 boss = boss.with_paragraph(format!(
-                    "⚠ 判据存在分歧（{} 条）：{}",
-                    dist.divergences.len(),
-                    dist.divergences.join("；")
+                    "条件后果推演：我方动作「{}」，共 {} 种对手反应。",
+                    cr.decision,
+                    cr.reactions.len()
+                ));
+                // 逐个反应登记反应概率（它们是引擎算出的数字）
+                for (i, r) in cr.reactions.iter().enumerate() {
+                    let key = format!("reaction_prob_{i}");
+                    if let Err(e) = report.add_number(Number::new(
+                        &key,
+                        r.probability,
+                        format!("对手反应「{}」的概率", r.reaction),
+                        ProvenanceId("prov_consequence".into()),
+                    )) {
+                        return ExecOutcome::Failed(format!("数字登记失败：{e}"));
+                    }
+                    boss_numbers.push(key);
+                    boss = boss.with_paragraph(format!(
+                        "· {}（概率 {:.2}）：{}",
+                        r.reaction, r.probability, r.drivers.join("；")
+                    ));
+                }
+                boss = boss.with_paragraph(format!(
+                    "注意：这是**条件推演**（我方固定在「{}」），不是「最可能发生什么」的概率预测。",
+                    cr.decision
                 ));
             }
-        } else if let Some(cr) = &self.state.consequence_report {
-            // ── whatif 模式的数字来源：条件后果报告 ──
-            //
-            // 该模式的路径里**没有 select**，故永远不会有均衡分布。
-            // 它的结论来自"我方做 d 时对手会怎么反应"——那是 `consequence_predict`
-            // 算出的反应概率与各方结果。
-            //
-            // ⚠️ 早先这里只有"无分布 ⇒ 无法给出结论"一句，于是 whatif 模式的
-            // 报告**一个数字都没有** ⇒ `check_provenance` 以 `EmptyReport` 拒绝
-            // ⇒ **report 阶段结构性不可达**（脚本化 E2E 实测暴露）。
-            if let Err(e) = report.register_provenance(
-                ProvenanceRecord::new("prov_consequence", ProvenanceKind::CodeComputed, 0)
-                    .with_code("shangyi-consequence", "0.1.0", "residual_subgame"),
-            ) {
-                return ExecOutcome::Failed(format!("provenance 注册失败：{e}"));
-            }
-            boss = boss.with_paragraph(format!(
-                "条件后果推演：我方动作「{}」，共 {} 种对手反应。",
-                cr.decision,
-                cr.reactions.len()
-            ));
-            // 逐个反应登记反应概率（它们是引擎算出的数字）
-            for (i, r) in cr.reactions.iter().enumerate() {
-                let key = format!("reaction_prob_{i}");
-                if let Err(e) = report.add_number(Number::new(
-                    &key,
-                    r.probability,
-                    format!("对手反应「{}」的概率", r.reaction),
-                    ProvenanceId("prov_consequence".into()),
-                )) {
-                    return ExecOutcome::Failed(format!("数字登记失败：{e}"));
+            Some(RecommendationBasis::DiscoveryReport) => {
+                let dr = self
+                    .state
+                    .discovery_report
+                    .as_ref()
+                    .expect("basis checked");
+                if let Err(e) = report.register_provenance(
+                    ProvenanceRecord::new("prov_discover", ProvenanceKind::CodeComputed, 0)
+                        .with_code("shangyi-discover", "0.1.0", "satisfice"),
+                ) {
+                    return ExecOutcome::Failed(format!("provenance 注册失败：{e}"));
                 }
-                boss_numbers.push(key);
                 boss = boss.with_paragraph(format!(
-                    "· {}（概率 {:.2}）：{}",
-                    r.reaction, r.probability, r.drivers.join("；")
+                    "满意策略发现：{} 个候选达标，{} 条放宽建议。",
+                    dr.satisfied.len(),
+                    dr.relaxation.len()
                 ));
-            }
-            boss = boss.with_paragraph(format!(
-                "注意：这是**条件推演**（我方固定在「{}」），不是「最可能发生什么」的概率预测。",
-                cr.decision
-            ));
-        } else if let Some(dr) = &self.state.discovery_report {
-            // ── discover 模式的数字来源：满意策略评估 ──
-            //
-            // 该模式路径里同样没有 select。它的结论是"哪些候选达到了抱负水平"
-            // ——达标概率由 `discover_satisfice` 算出。
-            if let Err(e) = report.register_provenance(
-                ProvenanceRecord::new("prov_discover", ProvenanceKind::CodeComputed, 0)
-                    .with_code("shangyi-discover", "0.1.0", "satisfice"),
-            ) {
-                return ExecOutcome::Failed(format!("provenance 注册失败：{e}"));
-            }
-            boss = boss.with_paragraph(format!(
-                "满意策略发现：{} 个候选达标，{} 条放宽建议。",
-                dr.satisfied.len(),
-                dr.relaxation.len()
-            ));
-            for (i, s) in dr.satisfied.iter().enumerate() {
-                let key = format!("satisfied_achv_{i}");
-                // 达标概率是引擎算出的核心数字
-                // 该候选在各准则上的**最低**达标概率——它是"是否满意"的依据
-                let min_achv = s
-                    .criteria
-                    .iter()
-                    .map(|c| c.achieved_probability)
-                    .fold(f64::INFINITY, f64::min);
-                if let Err(e) = report.add_number(Number::new(
-                    &key,
-                    min_achv,
-                    format!("候选「{}」的最低达标概率", s.candidate.id),
-                    ProvenanceId("prov_discover".into()),
-                )) {
-                    return ExecOutcome::Failed(format!("数字登记失败：{e}"));
-                }
-                boss_numbers.push(key);
-                boss = boss.with_paragraph(format!(
-                    "· {}：最低达标概率 {:.2}",
-                    s.candidate.id,
-                    s.criteria
+                for (i, s) in dr.satisfied.iter().enumerate() {
+                    let key = format!("satisfied_achv_{i}");
+                    // 达标概率是引擎算出的核心数字
+                    // 该候选在各准则上的**最低**达标概率——它是"是否满意"的依据
+                    let min_achv = s
+                        .criteria
                         .iter()
                         .map(|c| c.achieved_probability)
-                        .fold(f64::INFINITY, f64::min)
-                ));
+                        .fold(f64::INFINITY, f64::min);
+                    if let Err(e) = report.add_number(Number::new(
+                        &key,
+                        min_achv,
+                        format!("候选「{}」的最低达标概率", s.candidate.id),
+                        ProvenanceId("prov_discover".into()),
+                    )) {
+                        return ExecOutcome::Failed(format!("数字登记失败：{e}"));
+                    }
+                    boss_numbers.push(key);
+                    boss = boss.with_paragraph(format!(
+                        "· {}：最低达标概率 {:.2}",
+                        s.candidate.id, min_achv
+                    ));
+                }
             }
-        } else {
-            boss = boss.with_paragraph("本会话尚无任何引擎产出的结论（分布/后果报告/满意评估都缺）。");
+            None => {
+                boss = boss.with_paragraph("本会话尚无任何引擎产出的结论（分布/后果报告/满意评估都缺）。");
+            }
         }
         boss = boss.with_numbers(boss_numbers.clone());
         report.add_section(boss);
@@ -5106,9 +5306,25 @@ impl<'a> DomainExecutor<'a> {
     /// 这是真实网络调用（含限流的付费接口），与 `web_search` 同属"外部取证"。
     /// 不计数就会让预算形同虚设：模型可以无限次换地址刷计数。
     fn poi_survey(&mut self, call: &crate::agent::ToolCall, args: &serde_json::Value) -> ExecOutcome {
+        let address = args.get("address").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let radius = args.get("radius").and_then(|v| v.as_u64()).unwrap_or(500);
+        let poi_label = format!(
+            "poi:{}@{}m",
+            if address.is_empty() { "unset" } else { address },
+            radius
+        );
         // 先看有没有数据源：这是配置事实，与参数对不对无关。没有它就只剩「未取得」，
         // 报「缺 address」会把配置问题说成参数问题（该去申请 key 的人会去改参数）。
         let Some(provider) = self.poi else {
+            if let Some(task) = self.state.research_task.as_mut() {
+                task.observe_poi(
+                    &poi_label,
+                    false,
+                    Some("未绑定周边数据源（PoiProvider）"),
+                    self.state.retrieval_attempts.get(),
+                    16,
+                );
+            }
             return ExecOutcome::Blocked(
                 "未绑定周边数据源（PoiProvider）。周边门店计数**未取得**——\
                  不得解释为「周边没有门店」，也不得用推测填补。\
@@ -5116,14 +5332,13 @@ impl<'a> DomainExecutor<'a> {
                     .into(),
             );
         };
-        let address = args.get("address").and_then(|v| v.as_str()).unwrap_or("").trim();
         if address.is_empty() {
             return ExecOutcome::Failed("`poi_survey` 需要 `address`（要查的地址）。".into());
         }
+        let count_before = self.state.retrieval_attempts.get();
         if let Err(out) = self.retrieval_budget() {
             return out;
         }
-        let radius = args.get("radius").and_then(|v| v.as_u64()).unwrap_or(500);
         let query = PoiQuery {
             address: address.to_string(),
             radius: radius.min(u32::MAX as u64) as u32,
@@ -5136,7 +5351,10 @@ impl<'a> DomainExecutor<'a> {
                 // 这是"结构化证据不可伪造"的落点——回执由工具产生。
                 let mut receipts = Vec::new();
                 let scope = format!("{} · {} 米", survey.address, survey.radius);
-                let mut register = |label: &str, count: u64, receipts: &mut Vec<serde_json::Value>, sink: &mut Vec<(String, String, u64, String)>| {
+                if let Some(task) = self.state.research_task.as_mut() {
+                    task.observe_poi(&scope, true, None, self.state.retrieval_attempts.get(), 16);
+                }
+                let register = |label: &str, count: u64, receipts: &mut Vec<serde_json::Value>, sink: &mut Vec<(String, String, u64, String)>| {
                     let id = format!("{}#{}", call.call_id, receipts.len() + 1);
                     sink.push((id.clone(), label.to_string(), count, scope.clone()));
                     receipts.push(serde_json::json!({
@@ -5199,10 +5417,26 @@ impl<'a> DomainExecutor<'a> {
                 .to_string(),
                 )
             }
-            Err(SearchUnavailable::NoBackend { detail }) => ExecOutcome::Blocked(format!(
-                "周边数据源未配置：{detail}。周边计数**未取得**，不等于没有门店。"
-            )),
+            // 未配置后端不消耗 16 次真实网络预算。
+            Err(SearchUnavailable::NoBackend { detail }) => {
+                self.state.retrieval_attempts.set(count_before);
+                if let Some(task) = self.state.research_task.as_mut() {
+                    task.observe_poi(&poi_label, false, Some(&detail), count_before, 16);
+                }
+                ExecOutcome::Blocked(format!(
+                    "周边数据源未配置：{detail}。周边计数**未取得**，不等于没有门店。"
+                ))
+            }
             Err(SearchUnavailable::Failed { detail, .. }) => {
+                if let Some(task) = self.state.research_task.as_mut() {
+                    task.observe_poi(
+                        &poi_label,
+                        false,
+                        Some(&detail),
+                        self.state.retrieval_attempts.get(),
+                        16,
+                    );
+                }
                 ExecOutcome::Failed(format!("周边查询失败：{detail}"))
             }
         }
@@ -5888,6 +6122,14 @@ impl<'a> DomainExecutor<'a> {
 }
 
 impl ToolExecutor for DomainExecutor<'_> {
+    fn set_task_scope(&mut self, scope: Option<TaskScope>) {
+        Self::set_task_scope(self, scope);
+    }
+
+    fn clear_artifact_keys(&mut self, keys: &[String]) {
+        Self::clear_artifact_keys(self, keys);
+    }
+
     fn record_user_input(&mut self,text:&str,actor:&str) {self.ingest_user_input(text,actor);}
 
     fn take_invalidated_artifacts(&mut self)->Vec<ArtifactKind> {
@@ -5957,7 +6199,7 @@ impl ToolExecutor for DomainExecutor<'_> {
             "web_search" => self.web_search(&call.arguments),
             "web_fetch" => self.web_fetch(&call.arguments),
             "participant_profile_update" => self.participant_profile_update(&call.arguments),
-            // 兜底：**当前没有任何工具会走到这里**（25/25 已接线，
+            // 兜底：**当前没有任何工具会走到这里**（全部 39 个工具均已接线，
             // 由 `all_tools_are_wired` 断言）。保留它是因为这两件事都不该发生
             // 却都可能发生：
             //
@@ -5971,7 +6213,7 @@ impl ToolExecutor for DomainExecutor<'_> {
                 wiring_status().get(other).copied().unwrap_or("未注册于接线清单"),
             ),
         };
-        if matches!(call.name.as_str(),"web_search"|"web_fetch") {
+        if matches!(call.name.as_str(),"web_search"|"web_fetch"|"poi_survey") {
             match &outcome {
                 ExecOutcome::Ok(output) => {
                     self.state.task_retrieval_attempts += 1;
@@ -6170,6 +6412,16 @@ fn render_validation(errs: &[ValidationError]) -> String {
              前者是**诚实但无效**的（数值进了不了模型，分析做不下去），\
              后者才是本阶段的正解。**有依据的估计不是编造**——\
              接受情景假设不代表已经证实；仍须保留依据和假设性质，不能改写为用户提供的经营事实。",
+        );
+    }
+    if errs
+        .iter()
+        .any(|e| matches!(e, ValidationError::PayoffCellsAllMissing(_)))
+    {
+        out.push_str(
+            "\n\n**→ `payoffs.values.cells` 不能为空 `{}`**：即使是分步搭建的骨架，首次提交也须包含各策略组合的\
+             初始字面量支付与空 `params: {}`（之后再带 `merge: true` 增量补参数与引用）；\
+             若支付数字本身因缺少关键事实而未知，须先核实或改用 `conditional_analysis` 交付条件分析。",
         );
     }
     out
@@ -6655,6 +6907,43 @@ mod spec_normalize_tests {
         let n = normalize_spec_input(&spec).unwrap();
         assert_eq!(n["payoffs"]["form"], "normal");
     }
+
+    #[test]
+    fn deep_merge_replaces_variant_objects_without_leaking_stale_fields() {
+        let base = serde_json::json!({
+            "params": {
+                "p_price": {
+                    "name": "单杯定价",
+                    "value": {"kind": "literal", "value": 40},
+                    "source": {"kind": "public_data", "provenance": "财报"}
+                }
+            },
+            "payoffs": {
+                "form": "normal",
+                "values": {"cells": {"进,挡": {"us": 10, "them": 5}}}
+            }
+        });
+        let patch = serde_json::json!({
+            "params": {
+                "p_price": {
+                    "value": {"kind": "ref", "value": "p_ref"},
+                    "source": {"kind": "user_confirmed", "checkpoint": "cp2"}
+                }
+            },
+            "payoffs": {
+                "form": "extensive",
+                "values": {"tree": {"root": "n0"}}
+            }
+        });
+        let merged = super::deep_merge(base, patch);
+        assert_eq!(merged["params"]["p_price"]["name"], "单杯定价");
+        assert_eq!(merged["params"]["p_price"]["value"]["kind"], "ref");
+        assert_eq!(merged["params"]["p_price"]["source"]["kind"], "user_confirmed");
+        assert!(merged["params"]["p_price"]["source"].get("provenance").is_none());
+        assert_eq!(merged["payoffs"]["form"], "extensive");
+        assert!(merged["payoffs"]["values"].get("cells").is_none());
+        assert_eq!(merged["payoffs"]["values"]["tree"]["root"], "n0");
+    }
 }
 
 /// 「校验失败」的报错必须**给出出路**，而不只是宣布失败。
@@ -6694,5 +6983,131 @@ mod validation_message_tests {
             !msg.contains("user_confirmed"),
             "非假设类错误不该引导去改 source：{msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod offline_replay_tests {
+    use super::DomainExecutor;
+    use shangyi_gamespec::GameSpec;
+    use shangyi_intel::sidecar::{
+        ComputationBoundary, EncodingDetail, FileInfo, HeaderInfo, IngestReport,
+    };
+    use shangyi_kb::TheoryLibrary;
+    use shangyi_playbooks::Playbook;
+
+    fn test_playbook() -> Playbook {
+        Playbook::from_yaml(include_str!(
+            "../../../playbooks/pricing_response/playbook.yml"
+        ))
+        .expect("builtin pricing_response playbook")
+    }
+
+    fn minimal_spec_and_exec<'a>(
+        theory: &'a TheoryLibrary,
+        pb: &'a Playbook,
+    ) -> DomainExecutor<'a> {
+        let mut ex = DomainExecutor::new(theory, pb);
+        let spec: GameSpec = serde_json::from_value(serde_json::json!({
+            "game_id": "offline-replay",
+            "players": [
+                {"id": "us", "name": "我方", "vn_role": "focal", "relation_to_game": "player"},
+                {"id": "rival", "name": "对手", "vn_role": "substitutor", "relation_to_game": "player"},
+                {"id": "ext", "name": "监管", "vn_role": "complementor", "relation_to_game": "external_actor"}
+            ],
+            "strategies": {"us": ["维持"], "rival": ["维持"]},
+            "payoffs": {"form": "normal", "values": {"cells": {
+                "维持,维持": {"us": {"kind": "literal", "value": 1}, "rival": {"kind": "literal", "value": 1}}
+            }}},
+            "params": {}
+        }))
+        .expect("valid test GameSpec");
+        ex.state.game_spec = Some(spec);
+        ex
+    }
+
+    #[test]
+    fn restore_ingested_report_ignores_bad_json_and_appends_valid_reports() {
+        let theory = TheoryLibrary::new();
+        let pb = test_playbook();
+        let mut ex = DomainExecutor::new(&theory, &pb);
+        ex.restore_ingested_report("{not valid json");
+        assert!(ex.state().ingested.is_empty());
+
+        let report = IngestReport {
+            file: FileInfo {
+                path: "/missing/sales.csv".to_string(),
+                size_bytes: 10,
+                mtime_ms: 1,
+                sha256: None,
+                digest_note: None,
+            },
+            encoding: "utf-8".to_string(),
+            encoding_detail: EncodingDetail {
+                method: "utf8_strict".to_string(),
+                candidates_tried: vec![],
+                pinned: false,
+                note: String::new(),
+            },
+            delimiter: ",".to_string(),
+            delimiter_source: "sniffer".to_string(),
+            columns: vec!["a".to_string()],
+            columns_raw: vec!["a".to_string()],
+            header: HeaderInfo {
+                has_header: true,
+                confidence: "high".to_string(),
+                evidence: String::new(),
+                first_row_raw: vec!["a".to_string()],
+            },
+            row_count: 3,
+            row_count_exact: true,
+            scanned_rows: 3,
+            scan_limit: 100,
+            sample_rows: Vec::new(),
+            sample_rows_truncated: false,
+            column_hints: Vec::new(),
+            column_count: 1,
+            ragged_rows: 0,
+            blank_lines: 0,
+            notes: Vec::new(),
+            computation_boundary: ComputationBoundary::default(),
+        };
+        let j = serde_json::to_string(&report).unwrap();
+        ex.restore_ingested_report(&j);
+        ex.restore_ingested_report(&j);
+        assert_eq!(ex.state().ingested.len(), 2);
+        assert_eq!(ex.state().ingested[0].row_count, 3);
+    }
+
+    #[test]
+    fn restore_swarm_output_registers_only_accepted_player_moves_idempotently() {
+        let theory = TheoryLibrary::new();
+        let pb = test_playbook();
+        let mut ex = minimal_spec_and_exec(&theory, &pb);
+        ex.restore_swarm_output("{invalid");
+        assert!(ex.state().swarm_output.is_none());
+
+        let payload = serde_json::json!({
+            "rollouts": 1,
+            "counts": {"novel_moves_registered": 1},
+            "novel_move_verdicts": [
+                {"actor": "us", "action": "非常规新招", "accepted": true, "rejection": []},
+                {"actor": "us", "action": "被拒招数", "accepted": false, "rejection": ["缺依据"]},
+                {"actor": "ext", "action": "非直接玩家动作", "accepted": true, "rejection": []},
+                {"actor": "ghost", "action": "未知玩家动作", "accepted": true, "rejection": []}
+            ]
+        })
+        .to_string();
+
+        ex.restore_swarm_output(&payload);
+        ex.restore_swarm_output(&payload);
+        assert!(ex.state().swarm_output.is_some());
+        let spec = ex.state().game_spec.as_ref().unwrap();
+        assert_eq!(
+            spec.strategies["us"],
+            vec!["维持".to_string(), "[非常规] 非常规新招".to_string()]
+        );
+        assert!(!spec.strategies.contains_key("ext"));
+        assert!(!spec.strategies.contains_key("ghost"));
     }
 }

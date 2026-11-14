@@ -1,4 +1,6 @@
-# 商奕决策咨询前端
+# 商奕决策咨询前端（独立 Sidecar 版）
+
+> **主入口提示**：标准 DSH 三栏工作台请使用 `shangyi start`（依赖 `dsh` 与 `dsh-plugin-shangyi*`，文档见仓库根目录 [`README.md`](../../../README.md)）；本目录为可独立运行的零构建 Python Sidecar Web 控制台（`web_console.py`，包裹 `shangyi new / solve`）。
 
 以用户选定的 Onyx 官方 Chat UI 为主参考：左侧咨询导航、中间正文与输入、右侧证据。复现范围、来源和验证结果见 [DESIGN.md](DESIGN.md)。
 
@@ -106,4 +108,4 @@ Tabler 基础样式遵循随附 MIT 许可（`vendor/TABLER-LICENSE`），动效
 
 `research_record` 只接收本次 `web_fetch` 正文中逐字存在的字段与引文；登记属于原文匹配，不代表独立核实、当前有效或完整覆盖。`business_cost` 将一次性支出与月固定成本分开，并给出明确输入条件下的盈亏平衡与现金情景。未知费用不视为零，公开报价不等于成交价。实时对话右侧展示资料、来源与公式。
 
-搜索健康检查缓存 60 秒并执行有超时的真实查询；模型状态显示未检查，模型真实工具调用自检在每次咨询启动时进行。服务启动可加载既有 `~/.shangyi-secrets/searxng.env` 中的搜索地址（不会执行文件内容），显式环境变量优先。
+搜索健康检查缓存 60 秒并执行有超时的真实查询；模型状态显示未检查，模型真实工具调用自检在每次咨询启动时进行。SearXNG 后端已于 2026-10 退场，当前搜索优先使用环境变量 `BOCHA_API_KEY`，服务启动亦可从 `~/.shangyi-secrets/bocha.env` 读取密钥（不会执行文件内容，显式环境变量优先）。

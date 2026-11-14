@@ -271,7 +271,7 @@ window.__ModuleLoader__.load({
         body,
         state.data ? h("div", { style: SMALL },
           "来源：" + state.data.source.path + "（" + state.data.source.caseId + "，请求 " + state.data.requested + "）") : null,
-        h("div", { style: Object.assign({ marginTop: 10 }, SMALL) }, "dsh-plugin-shangyi 0.1.0 · 零构建 bundle"));
+        h("div", { style: Object.assign({ marginTop: 10 }, SMALL) }, "dsh-plugin-shangyi 0.2.0 · 零构建 bundle"));
     }
 
     function createTrigger(ctx) {

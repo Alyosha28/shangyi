@@ -881,7 +881,9 @@ impl PhaseMachine {
 
     /// Re-enter the current review after explicit user correction or explanation request.
     /// This never approves a checkpoint and cannot reopen an already-approved one.
-    pub fn reconsider_current_checkpoint(&mut self, id: CheckpointId) -> Result<(), PhaseGateError> {
+    ///
+    /// Returns cleared artifact wire keys so callers can keep executor state in sync.
+    pub fn reconsider_current_checkpoint(&mut self, id: CheckpointId) -> Result<Vec<String>, PhaseGateError> {
         if self.graph.checkpoint_at(self.phase) != Some(id)
             || !matches!(self.checkpoints.get(&id), Some(CheckpointStatus::Open { .. } | CheckpointStatus::Rejected { .. }))
         {
@@ -889,9 +891,14 @@ impl PhaseMachine {
         }
         self.checkpoints.remove(&id);
         // The current proposed artifact is stale until the model rebuilds/re-presents it.
+        let mut cleared = Vec::new();
         let kinds: Vec<_> = self.graph.produces(self.phase).iter().copied().collect();
-        for kind in kinds { self.artifacts.remove(kind.key()); }
-        Ok(())
+        for kind in kinds {
+            if self.artifacts.remove(kind.key()).is_some() {
+                cleared.push(kind.key().to_string());
+            }
+        }
+        Ok(cleared)
     }
 
     /// 重新打开已结算的 checkpoint（用户选"修改"后的"重新确认"路径）。
@@ -1001,6 +1008,30 @@ impl PhaseMachine {
         }
         // 先按"主后继"过闸门（闸门只依赖当前阶段，与目标无关）
         let _ = self.gate_to_advance()?;
+        self.phase = target;
+        Ok(target)
+    }
+
+    /// 跳过当前可选阶段并直接前往其边后继（如 `whatif` 模式下从 `solve` 直入 `consequence`）。
+    ///
+    /// 安全不变量：仅允许当前阶段本身为可选节点（`is_optional`）、无自身 checkpoint，
+    /// 且 `target` 是当前阶段的合法后继边。前置必选阶段（如 `model_build` 与 `cp2`）
+    /// 在进入当前阶段前已通过闸门校验。
+    pub fn skip_optional_to(&mut self, target: SessionPhase) -> Result<SessionPhase, PhaseGateError> {
+        if !self.graph.is_optional(self.phase) || self.graph.checkpoint_at(self.phase).is_some() {
+            return Err(PhaseGateError::IllegalTransition {
+                from: self.phase,
+                to: target,
+                allowed: vec![],
+            });
+        }
+        if !self.graph.is_edge(self.phase, target) {
+            return Err(PhaseGateError::IllegalTransition {
+                from: self.phase,
+                to: target,
+                allowed: self.graph.successors(self.phase),
+            });
+        }
         self.phase = target;
         Ok(target)
     }

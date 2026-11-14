@@ -89,29 +89,74 @@ check('kb 正文：越界 slug 全部被拒', () => {
 
 // ── 3. 案例摘要 + 独立对拍 ──────────────────────────────────────────────────
 // 第二套推导：只用事件顺序，不共享 inferProgress 的代码路径。
+function independentIsRollbackRewind(fromPhase, toPhase, dueTo) {
+  const from = typeof fromPhase === 'string' ? fromPhase : ''
+  const to = typeof toPhase === 'string' ? toPhase : ''
+  if (!from || from === to) return false
+  const d = typeof dueTo === 'string' ? dueTo.trim() : ''
+  const dl = d.toLowerCase()
+  return (
+    d.includes('（用户确认：') ||
+    d.includes('模型提议') ||
+    d.includes('用户同意') ||
+    dl.startsWith('rollback') ||
+    dl.startsWith('user_rewind') ||
+    dl.startsWith('request_rewind')
+  )
+}
+
 function independentProgress(events) {
   const ORDER = { intake: 0, intel: 1, model_build: 2, solve: 3, select: 4, consequence: 5, discover: 6, recommend: 7, report: 8, archived: 9 }
   let phase = null
+  let scope = null
+  let hasConditional = false
+  const started = new Map()
   const openItems = []
   let lastTool = null
   for (const e of events) {
     if (e.type === 'phase_entered' && e.to) phase = e.to
+    if (e.type === 'task_scope_selected' && e.scope) {
+      scope = e.scope
+      if (e.scope === 'conditional') hasConditional = true
+    }
+    if (e.type === 'scoped_task_completed' && e.result) {
+      if (e.result.scope) {
+        scope = e.result.scope
+        if (e.result.scope === 'conditional') hasConditional = true
+      }
+      if (e.result.conditional) hasConditional = true
+    }
     if (e.type === 'phase_rewound' && e.to) {
       phase = e.to
       lastTool = null
       const tIdx = ORDER[e.to]
+      const clearTarget = !independentIsRollbackRewind(e.from, e.to, e.due_to)
+      const cutoff = typeof tIdx === 'number' ? (clearTarget ? tIdx : tIdx + 1) : null
+      if (cutoff !== null && cutoff <= 7) hasConditional = false
+      if (typeof tIdx === 'number' && tIdx === 0 && clearTarget) scope = null
       for (let i = openItems.length - 1; i >= 0; i--) {
         const cIdx = openItems[i].phase ? ORDER[openItems[i].phase] : undefined
-        if (typeof tIdx === 'number' && (typeof cIdx === 'number' ? cIdx > tIdx : e.to === 'intake')) {
+        if (cutoff !== null && (typeof cIdx === 'number' ? cIdx >= cutoff : (e.to === 'intake' && clearTarget))) {
           openItems.splice(i, 1)
         }
       }
     }
     if (e.type === 'followup_task_started') {
-      phase = 'intake'
+      const wasConditional =
+        scope === 'conditional' ||
+        hasConditional ||
+        e.prior_scope === 'conditional' ||
+        e.scope === 'conditional' ||
+        e.task_scope === 'conditional'
+      scope = null
+      hasConditional = false
       lastTool = null
-      openItems.length = 0
+      if (wasConditional) {
+        phase = 'intake'
+        openItems.length = 0
+      }
     }
+    if (e.type === 'tool_call_started' && e.call_id) started.set(e.call_id, e.name)
     if (e.type === 'checkpoint_opened' && e.id) {
       const i = openItems.findIndex((x) => x.id === e.id)
       if (i >= 0) openItems.splice(i, 1)
@@ -124,7 +169,27 @@ function independentProgress(events) {
         if (i >= 0) openItems.splice(i, 1)
       }
     }
-    if (e.type === 'tool_call_finished') lastTool = e
+    if (e.type === 'tool_call_finished') {
+      lastTool = e
+      const name = e.call_id ? started.get(e.call_id) : null
+      const outcome = e.outcome || {}
+      if ((outcome.status || '') === 'ok') {
+        if (name === 'select_task_scope') {
+          try {
+            const parsed = JSON.parse(outcome.output || '')
+            if (parsed && parsed.scope) {
+              scope = parsed.scope
+              if (parsed.scope === 'conditional') hasConditional = true
+            }
+          } catch {}
+        } else if (name === 'conditional_analysis') {
+          let parsed = null
+          try { parsed = JSON.parse(outcome.output || '') } catch {}
+          scope = (parsed && parsed.scope) || 'conditional'
+          if ((parsed && parsed.conditional) || scope === 'conditional') hasConditional = true
+        }
+      }
+    }
   }
   const last = events.length ? events[events.length - 1] : null
   let openTurn = false
@@ -241,6 +306,20 @@ check('路由注册：4 条 GET + 1 条 POST + 处理器返回码', async () => 
   assert.equal(health.status, 200)
   assert.equal(health.cache, 'no-store')
   assert.ok('binary' in health.body && 'kb' in health.body && 'workspace' in health.body && Array.isArray(health.body.problems))
+  // 无 tools 运行时视图时必须 fail-closed（不能静默报告 ok: true）
+  assert.equal(health.body.mcpTools.status, 'unknown')
+  assert.equal(health.body.ok, false)
+  assert.ok(health.body.problems.some((p) => p.code === 'mcp_tools_unknown'))
+
+  const unknownHealth = mod.getHealthStatus({ binPath: process.execPath, home: tempFixtureHome || os.tmpdir() })
+  assert.equal(unknownHealth.ok, false)
+  assert.equal(unknownHealth.mcpTools.status, 'unknown')
+  assert.ok(unknownHealth.problems.some((p) => p.code === 'mcp_tools_unknown'))
+
+  const healthy = mod.getHealthStatus({ binPath: process.execPath, mcpToolCount: 39, home: tempFixtureHome || os.tmpdir() })
+  assert.equal(healthy.ok, true)
+  assert.equal(healthy.mcpTools.status, 'ok')
+  assert.equal(healthy.problems.length, 0)
 
   const degraded = mod.getHealthStatus({ binPath: '/nonexistent/shangyi-missing-bin', mcpToolNames: [], home: tempFixtureHome || os.tmpdir() })
   assert.equal(degraded.ok, false)

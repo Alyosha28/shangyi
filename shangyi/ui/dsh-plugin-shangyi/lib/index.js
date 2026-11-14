@@ -124,36 +124,83 @@ function exprText(v) {
   return String(v)
 }
 
+function isPlainObject(v) {
+  return Boolean(v) && typeof v === 'object' && !Array.isArray(v)
+}
+
+function jsonValuesEqual(a, b) {
+  if (a === b) return true
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, i) => jsonValuesEqual(item, b[i]))
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const keysA = Object.keys(a)
+    const keysB = Object.keys(b)
+    return (
+      keysA.length === keysB.length &&
+      keysA.every((k) => Object.prototype.hasOwnProperty.call(b, k) && jsonValuesEqual(a[k], b[k]))
+    )
+  }
+  return false
+}
+
+function deepMergeJson(base, patch) {
+  if (isPlainObject(base) && isPlainObject(patch)) {
+    const hasOwn = Object.prototype.hasOwnProperty
+    const kindChanged = hasOwn.call(base, 'kind') && hasOwn.call(patch, 'kind') && !jsonValuesEqual(base.kind, patch.kind)
+    const formChanged = hasOwn.call(base, 'form') && hasOwn.call(patch, 'form') && !jsonValuesEqual(base.form, patch.form)
+    if (kindChanged || formChanged) {
+      return deepMergeJson(null, patch)
+    }
+    const out = { ...base }
+    for (const [k, v] of Object.entries(patch)) {
+      out[k] = hasOwn.call(out, k) ? deepMergeJson(out[k], v) : deepMergeJson(null, v)
+    }
+    return out
+  }
+  if (Array.isArray(patch)) return patch.map((x) => deepMergeJson(null, x))
+  return patch
+}
+
 /** 把一次 gamespec_build 的入参解析成 spec（兼容模型把参数塞进 arguments 字符串或 spec 键的形状）。 */
 function unwrapSpec(argsRaw) {
   if (!argsRaw) return null
   let v
   try { v = JSON.parse(argsRaw) } catch { return null }
   // 实测存在 {"arguments":"{...}"} 的双层形状
-  for (let i = 0; i < 3 && v && typeof v === 'object' && typeof v.arguments === 'string'; i++) {
+  for (let i = 0; i < 3 && isPlainObject(v) && typeof v.arguments === 'string'; i++) {
     try { v = JSON.parse(v.arguments) } catch { break }
   }
-  if (v && typeof v === 'object' && v.spec && typeof v.spec === 'object' && !v.players && !v.params) {
-    v = v.spec
+  if (isPlainObject(v) && isPlainObject(v.spec) && !v.players && !v.params) {
+    const outerMerge = v.merge
+    v = typeof outerMerge === 'boolean' && v.spec.merge === undefined
+      ? { ...v.spec, merge: outerMerge }
+      : v.spec
   }
-  return v && typeof v === 'object' ? v : null
+  return isPlainObject(v) ? v : null
 }
 
 /** 合并所有 gamespec_build 入参（支持 merge:true 增量构建与完整覆盖），得到模型最终想建的博弈骨架。 */
 function mergeSpecs(specs) {
   const out = { players: null, strategies: null, payoffs: null, params: null, game_id: null }
   for (const s of specs) {
-    if (!s) continue
+    if (!isPlainObject(s)) continue
     const inc = s.merge === true
     if (Array.isArray(s.players) && s.players.length) out.players = s.players
-    if (s.strategies && typeof s.strategies === 'object' && Object.keys(s.strategies).length) {
-      out.strategies = inc && out.strategies ? { ...out.strategies, ...s.strategies } : s.strategies
+    if (isPlainObject(s.strategies) && Object.keys(s.strategies).length) {
+      out.strategies = inc && out.strategies
+        ? deepMergeJson(out.strategies, s.strategies)
+        : deepMergeJson(null, s.strategies)
     }
-    if (s.payoffs && typeof s.payoffs === 'object') {
-      out.payoffs = inc && out.payoffs ? { ...out.payoffs, ...s.payoffs } : s.payoffs
+    if (isPlainObject(s.payoffs)) {
+      out.payoffs = inc && out.payoffs
+        ? deepMergeJson(out.payoffs, s.payoffs)
+        : deepMergeJson(null, s.payoffs)
     }
-    if (s.params && typeof s.params === 'object') {
-      out.params = inc && out.params ? { ...out.params, ...s.params } : s.params
+    if (isPlainObject(s.params)) {
+      out.params = inc && out.params
+        ? deepMergeJson(out.params, s.params)
+        : deepMergeJson(null, s.params)
     }
     if (typeof s.game_id === 'string' && s.game_id) out.game_id = s.game_id
   }
@@ -252,57 +299,80 @@ function summarizeParamSource(src) {
   return { sourceKind: kind, sourceDetail: '' }
 }
 
-function rewindProjectionState(st, toPhase) {
+function isRollbackRewind(fromPhase, toPhase, dueTo) {
+  const from = typeof fromPhase === 'string' ? fromPhase : ''
+  const to = typeof toPhase === 'string' ? toPhase : ''
+  if (!from || from === to) return false
+  const d = typeof dueTo === 'string' ? dueTo.trim() : ''
+  const dl = d.toLowerCase()
+  return (
+    d.includes('（用户确认：') ||
+    d.includes('模型提议') ||
+    d.includes('用户同意') ||
+    dl.startsWith('rollback') ||
+    dl.startsWith('user_rewind') ||
+    dl.startsWith('request_rewind')
+  )
+}
+
+function rewindProjectionState(st, e) {
+  const toPhase = e && e.to
   const rank = PHASE_ORDER_INDEX[toPhase]
   if (typeof rank !== 'number') return
-  if (rank <= 2) st.specBuilds = []
-  if (rank <= 3) st.solve = null
-  if (rank <= 4) st.fuse = null
-  if (rank <= 5) st.consequence = null
-  if (rank <= 6) st.discovery = null
-  if (rank <= 7) {
+  const clearTarget = !isRollbackRewind(e.from, toPhase, e.due_to)
+  const cutoff = clearTarget ? rank : rank + 1
+  if (cutoff <= 2) st.specBuilds = []
+  if (cutoff <= 3) st.solve = null
+  if (cutoff <= 4) st.fuse = null
+  if (cutoff <= 5) st.consequence = null
+  if (cutoff <= 6) st.discovery = null
+  if (cutoff <= 7) {
     st.recommend = null
     st.conditional = null
     st.scopedResult = null
   }
-  if (rank <= 8) st.reportModel = null
-  if (rank === 0) {
+  if (cutoff <= 8) st.reportModel = null
+  if (rank === 0 && clearTarget) {
     st.scope = null
     st.scopeReason = null
     st.costs.clear()
     st.constraints = []
     st.constraintCheck = null
   }
+  st.failures = []
   for (const cp of st.checkpointTimeline) {
-    if (cp.status === 'pending') {
+    if (cp.status === 'pending' || cp.status === 'answered') {
       const cpRank = PHASE_ORDER_INDEX[cp.phase]
-      if ((typeof cpRank === 'number' && cpRank > rank) || toPhase === 'intake') {
+      if ((typeof cpRank === 'number' && cpRank >= cutoff) || (toPhase === 'intake' && clearTarget)) {
         cp.status = 'rewound'
       }
     }
   }
 }
 
-function resetProjectionForFollowup(st) {
+function resetProjectionForFollowup(st, e = null) {
+  const wasConditional =
+    st.scope === 'conditional' ||
+    Boolean(st.conditional) ||
+    Boolean(st.scopedResult && st.scopedResult.scope === 'conditional') ||
+    Boolean(e && (e.prior_scope === 'conditional' || e.scope === 'conditional' || e.task_scope === 'conditional'))
   st.scope = null
   st.scopeReason = null
-  st.specBuilds = []
-  st.solve = null
-  st.fuse = null
-  st.consequence = null
-  st.discovery = null
-  st.recommend = null
-  st.reportModel = null
   st.scopedResult = null
   st.conditional = null
-  st.costs.clear()
-  st.constraints = []
-  st.constraintCheck = null
-  st.poiSurveys = []
-  st.researchRecords = []
   st.failures = []
-  for (const cp of st.checkpointTimeline) {
-    if (cp.status === 'pending') cp.status = 'rewound'
+  if (wasConditional) {
+    st.specBuilds = []
+    st.solve = null
+    st.fuse = null
+    st.consequence = null
+    st.discovery = null
+    st.recommend = null
+    st.reportModel = null
+    st.constraintCheck = null
+    for (const cp of st.checkpointTimeline) {
+      if (cp.status === 'pending' || cp.status === 'answered') cp.status = 'rewound'
+    }
   }
 }
 
@@ -346,10 +416,10 @@ export function projectCase(caseRef = 'latest', home = defaultHome()) {
     if (!e || !e.type) continue
     if (e.type === 'phase_entered' && e.to) st.phases.push(e.to)
     else if (e.type === 'phase_rewound' && e.to) {
-      rewindProjectionState(st, e.to)
+      rewindProjectionState(st, e)
       st.phases.push(`回退→${e.to}`)
     } else if (e.type === 'followup_task_started') {
-      resetProjectionForFollowup(st)
+      resetProjectionForFollowup(st, e)
     } else if (e.type === 'task_scope_selected' && e.scope) {
       st.scope = e.scope
       st.scopeReason = e.reason || null
@@ -455,9 +525,15 @@ export function projectCase(caseRef = 'latest', home = defaultHome()) {
         st.constraints.push(parsedOut)
       } else if (name === 'constraint_check' && parsedOut) {
         st.constraintCheck = parsedOut
-      } else if (name === 'conditional_analysis' && parsedOut) {
-        st.scopedResult = parsedOut
-        if (parsedOut.conditional) st.conditional = parsedOut.conditional
+      } else if (name === 'select_task_scope' && parsedOut) {
+        if (parsedOut.scope) st.scope = parsedOut.scope
+        if (parsedOut.reason) st.scopeReason = parsedOut.reason
+      } else if (name === 'conditional_analysis') {
+        st.scope = (parsedOut && parsedOut.scope) || 'conditional'
+        if (parsedOut) {
+          st.scopedResult = parsedOut
+          if (parsedOut.conditional) st.conditional = parsedOut.conditional
+        }
       } else if (name === 'poi_survey' && parsedOut) {
         st.poiSurveys.push(parsedOut)
       } else if (name === 'research_record' && parsedOut) {
@@ -670,11 +746,30 @@ const PHASE_ORDER_INDEX = {
 
 function inferScope(events) {
   let scope = null
+  const started = new Map()
   for (const e of events) {
     if (!e || !e.type) continue
-    if (e.type === 'task_scope_selected' && e.scope) scope = e.scope
+    if (e.type === 'tool_call_started' && e.call_id) started.set(e.call_id, e.name)
+    else if (e.type === 'task_scope_selected' && e.scope) scope = e.scope
     else if (e.type === 'scoped_task_completed' && e.result && e.result.scope) scope = e.result.scope
-    else if (e.type === 'followup_task_started') scope = null
+    else if (e.type === 'tool_call_finished' && e.call_id) {
+      const name = started.get(e.call_id)
+      const outcome = e.outcome || {}
+      if ((outcome.status || '') === 'ok') {
+        if (name === 'select_task_scope') {
+          try {
+            const parsed = JSON.parse(outcome.output || '')
+            if (parsed && parsed.scope) scope = parsed.scope
+          } catch {}
+        } else if (name === 'conditional_analysis') {
+          let parsed = null
+          try { parsed = JSON.parse(outcome.output || '') } catch {}
+          scope = (parsed && parsed.scope) || 'conditional'
+        }
+      }
+    } else if (e.type === 'phase_rewound' && e.to === 'intake' && !isRollbackRewind(e.from, e.to, e.due_to)) {
+      scope = null
+    } else if (e.type === 'followup_task_started') scope = null
   }
   return scope
 }
@@ -702,6 +797,9 @@ function inferScope(events) {
  */
 export function inferProgress(events) {
   let phase = null
+  let scope = null
+  let hasConditional = false
+  const started = new Map()
   const openMap = new Map()
   const openOrder = []
   let lastTool = null
@@ -709,27 +807,53 @@ export function inferProgress(events) {
   for (const e of events) {
     if (!e || !e.type) continue
     if (e.type === 'phase_entered' && e.to) phase = e.to
-    else if (e.type === 'phase_rewound' && e.to) {
+    else if (e.type === 'task_scope_selected' && e.scope) {
+      scope = e.scope
+      if (e.scope === 'conditional') hasConditional = true
+    } else if (e.type === 'scoped_task_completed' && e.result) {
+      if (e.result.scope) {
+        scope = e.result.scope
+        if (e.result.scope === 'conditional') hasConditional = true
+      }
+      if (e.result.conditional) hasConditional = true
+    } else if (e.type === 'phase_rewound' && e.to) {
       phase = e.to
       lastTool = null
       const targetIdx = PHASE_ORDER_INDEX[e.to]
+      const rollback = isRollbackRewind(e.from, e.to, e.due_to)
+      const clearTarget = !rollback
+      const cutoff = typeof targetIdx === 'number' ? (clearTarget ? targetIdx : targetIdx + 1) : null
+      if (cutoff !== null && cutoff <= 7) hasConditional = false
+      if (typeof targetIdx === 'number' && targetIdx === 0 && clearTarget) scope = null
       for (let i = openOrder.length - 1; i >= 0; i--) {
         const id = openOrder[i]
         const cp = openMap.get(id)
         const cpIdx = cp && cp.phase ? PHASE_ORDER_INDEX[cp.phase] : undefined
         if (
-          typeof targetIdx === 'number' &&
-          (typeof cpIdx === 'number' ? cpIdx > targetIdx : e.to === 'intake')
+          cutoff !== null &&
+          (typeof cpIdx === 'number' ? cpIdx >= cutoff : (e.to === 'intake' && clearTarget))
         ) {
           openMap.delete(id)
           openOrder.splice(i, 1)
         }
       }
     } else if (e.type === 'followup_task_started') {
-      phase = 'intake'
+      const wasConditional =
+        scope === 'conditional' ||
+        hasConditional ||
+        e.prior_scope === 'conditional' ||
+        e.scope === 'conditional' ||
+        e.task_scope === 'conditional'
+      scope = null
+      hasConditional = false
       lastTool = null
-      openMap.clear()
-      openOrder.length = 0
+      if (wasConditional) {
+        phase = 'intake'
+        openMap.clear()
+        openOrder.length = 0
+      }
+    } else if (e.type === 'tool_call_started' && e.call_id) {
+      started.set(e.call_id, e.name)
     } else if (e.type === 'checkpoint_opened' && e.id) {
       openMap.set(e.id, {
         id: String(e.id),
@@ -748,7 +872,27 @@ export function inferProgress(events) {
         const idx = openOrder.indexOf(e.id)
         if (idx >= 0) openOrder.splice(idx, 1)
       }
-    } else if (e.type === 'tool_call_finished') lastTool = e
+    } else if (e.type === 'tool_call_finished') {
+      lastTool = e
+      const name = e.call_id ? started.get(e.call_id) : null
+      const outcome = e.outcome || {}
+      if ((outcome.status || '') === 'ok') {
+        if (name === 'select_task_scope') {
+          try {
+            const parsed = JSON.parse(outcome.output || '')
+            if (parsed && parsed.scope) {
+              scope = parsed.scope
+              if (parsed.scope === 'conditional') hasConditional = true
+            }
+          } catch {}
+        } else if (name === 'conditional_analysis') {
+          let parsed = null
+          try { parsed = JSON.parse(outcome.output || '') } catch {}
+          scope = (parsed && parsed.scope) || 'conditional'
+          if ((parsed && parsed.conditional) || scope === 'conditional') hasConditional = true
+        }
+      }
+    }
     else if (e.type === 'turn_started') openTurn = true
     else if (e.type === 'turn_ended') openTurn = false
   }
@@ -1340,6 +1484,17 @@ export function getHealthStatus(opts = {}) {
         'bash shangyi/ui/scripts/install-workbench.sh --no-open'
       ]
     })
+  } else if (mcpTools.status === 'unknown') {
+    problems.push({
+      code: 'mcp_tools_unknown',
+      severity: 'blocking',
+      title: '未能核实 MCP 确定性工具组（mcp__shangyi__*）注册状态',
+      detail: '宿主上下文未提供可读的工具注册视图（tools.view()），无法确认确定性领域工具是否已连接；在确认前请勿依赖对话完成定量分析。',
+      fixCommands: [
+        'shangyi start',
+        'bash shangyi/ui/scripts/install-workbench.sh --no-open'
+      ]
+    })
   }
   if (!kb.ok) {
     problems.push({
@@ -1352,7 +1507,7 @@ export function getHealthStatus(opts = {}) {
   }
 
   return {
-    ok: Boolean(binary.found && kb.ok && mcpTools.status !== 'missing'),
+    ok: Boolean(binary.found && kb.ok && mcpTools.status === 'ok'),
     checkedAt: new Date().toISOString(),
     binary,
     kb,

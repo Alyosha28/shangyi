@@ -909,11 +909,11 @@ window.__ModuleLoader__.load({
     };
 
     SYData.COST_TREATMENT_LABELS = {
-      cash_expense: "一次性/当期现金支出",
-      recurring_cash: "周期性现金支出",
+      cash_expense: "现金支出",
       refundable_deposit: "可退押金（资金占用）",
       opportunity_cost: "机会成本（非现金）",
-      non_cash: "非现金账面项"
+      noncash_expense: "非现金账面项",
+      unknown: "性质待定（未归类）"
     };
 
     SYData.PERIOD_LABELS = {

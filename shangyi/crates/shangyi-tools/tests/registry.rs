@@ -57,6 +57,13 @@ fn standard_registry_has_all_documented_tools() {
         "recommend_build",
     ];
     assert_eq!(r.len(), expected.len(), "工具数应为 {}", expected.len());
+    assert_eq!(
+        r.len(),
+        shangyi_tools::STANDARD_TOOL_COUNT,
+        "STANDARD_TOOL_COUNT ({}) 与实际注册数 ({}) 不一致",
+        shangyi_tools::STANDARD_TOOL_COUNT,
+        r.len()
+    );
     for name in expected {
         assert!(r.get(name).is_some(), "缺少工具 `{name}`");
     }
